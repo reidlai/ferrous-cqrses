@@ -1,8 +1,8 @@
 # ferrous-cqrses
 
-[← Back to FerrousCX Root Architecture](https://github.com/reidlai/ferrouscx-bmad)
+[← Back to FerrousCX Root Architecture](https://github.com/reidlai/ferrous-cx)
 
-[![Component Type: Rust CQRS-ES Core](https://img.shields.io/badge/crate-lib%20%2B%20bin-blue.svg)](https://github.com/reidlai/ferrouscx-bmad)
+[![Component Type: Rust CQRS-ES Core](https://img.shields.io/badge/crate-lib%20%2B%20bin-blue.svg)](https://github.com/reidlai/ferrous-cx)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
 [![DevSecOps CI: Tier 1](https://img.shields.io/badge/DevSecOps%20CI-Tier%201%20Passing-brightgreen.svg)](.github/workflows/devsecops-ci.yml)
 [![Pre-Commit Enabled](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](.pre-commit-config.yaml)
