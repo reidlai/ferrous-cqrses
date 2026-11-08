@@ -11,6 +11,8 @@ pub mod error;
 pub mod events;
 pub mod handler;
 pub mod id;
+pub mod projection;
+pub mod publisher;
 pub mod serialization;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
@@ -31,6 +33,10 @@ pub use events::{
 };
 pub use handler::CommandHandler;
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
+pub use projection::ConsolidatedOrderProjection;
+pub use publisher::{
+    IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
+};
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 
 /// Convenience module for glob-importing all core domain contracts.
@@ -52,5 +58,9 @@ pub mod prelude {
     };
     pub use crate::handler::CommandHandler;
     pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
+    pub use crate::projection::ConsolidatedOrderProjection;
+    pub use crate::publisher::{
+        IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
+    };
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 }

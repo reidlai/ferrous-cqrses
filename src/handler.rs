@@ -257,6 +257,21 @@ impl CommandHandler {
         Ok(domain_event)
     }
 
+    /// Rolls back the most recent domain event and processed command ID for an order
+    /// in the event of an unrecoverable downstream publishing failure.
+    pub fn rollback_last_event(&mut self, order_id: &str, command_id: &Uuid) {
+        self.processed_commands.remove(command_id);
+        if let Some(events) = self.event_store.get_mut(order_id) {
+            events.pop();
+            if events.is_empty() {
+                self.event_store.remove(order_id);
+                self.aggregates.remove(order_id);
+            } else if let Ok(rehydrated) = OrderAggregate::from_events(events.as_slice()) {
+                self.aggregates.insert(order_id.to_string(), rehydrated);
+            }
+        }
+    }
+
     /// Rehydrates an order aggregate from historical domain events and updates internal cache.
     pub fn rehydrate(
         &mut self,

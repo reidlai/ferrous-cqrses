@@ -159,4 +159,13 @@ impl DomainEvent {
             Self::OrderCancelled(e) => e.version,
         }
     }
+
+    pub fn timestamp(&self) -> DateTime<Utc> {
+        match self {
+            Self::OrderCreated(e) => e.created_at,
+            Self::CreditIssued(e) => e.issued_at,
+            Self::OrderStatusUpdated(e) => e.updated_at,
+            Self::OrderCancelled(e) => e.cancelled_at,
+        }
+    }
 }

@@ -17,6 +17,8 @@ use crate::commands::OrderCommand;
 use crate::error::DomainError;
 use crate::events::DomainEvent;
 use crate::handler::CommandHandler;
+use crate::projection::ConsolidatedOrderProjection;
+use crate::publisher::{InMemoryStreamPublisher, StreamPublisher};
 
 /// Configuration options for the command consumer and streaming broker connection.
 #[derive(Debug, Clone, PartialEq, Eq, Parser, Serialize, Deserialize)]
@@ -47,6 +49,10 @@ pub struct Config {
     #[arg(long, env = "TOPIC_ORDERS_INTAKE", default_value = "intake")]
     pub topic_orders_intake: String,
 
+    /// Target consolidated order projections topic name
+    #[arg(long, env = "TOPIC_ORDERS_CONSOLIDATED", default_value = "consolidated")]
+    pub topic_orders_consolidated: String,
+
     /// Consumer group name for sequential partitioned consumption
     #[arg(long, env = "CONSUMER_GROUP", default_value = "cg-cmd-handler")]
     pub consumer_group: String,
@@ -60,6 +66,7 @@ impl Default for Config {
             iggy_password: "iggy".to_string(),
             stream_name: "orders".to_string(),
             topic_orders_intake: "intake".to_string(),
+            topic_orders_consolidated: "consolidated".to_string(),
             consumer_group: "cg-cmd-handler".to_string(),
         }
     }
@@ -279,31 +286,37 @@ impl StreamConsumer for IggyStreamConsumer {
 }
 
 /// Core sequential command consumer orchestrating message ingestion, JSON parsing,
-/// command dispatch, and offset acknowledgement.
-pub struct CommandConsumer<S: StreamConsumer = InMemoryStreamConsumer> {
+/// command dispatch, consolidated projection snapshot publishing, and offset acknowledgement.
+pub struct CommandConsumer<
+    S: StreamConsumer = InMemoryStreamConsumer,
+    P: StreamPublisher = InMemoryStreamPublisher,
+> {
     config: Config,
     handler: CommandHandler,
     stream: S,
+    publisher: P,
     outcomes: Vec<CommandOutcome>,
 }
 
-impl<S: StreamConsumer> CommandConsumer<S> {
-    /// Creates a new command consumer with the given configuration and stream source.
-    pub fn new(config: Config, stream: S) -> Self {
+impl<S: StreamConsumer, P: StreamPublisher> CommandConsumer<S, P> {
+    /// Creates a new command consumer with the given configuration, stream source, and publisher.
+    pub fn new(config: Config, stream: S, publisher: P) -> Self {
         Self {
             config,
             handler: CommandHandler::new(),
             stream,
+            publisher,
             outcomes: Vec::new(),
         }
     }
 
     /// Creates a command consumer with an existing pre-configured [`CommandHandler`].
-    pub fn with_handler(config: Config, stream: S, handler: CommandHandler) -> Self {
+    pub fn with_handler(config: Config, stream: S, publisher: P, handler: CommandHandler) -> Self {
         Self {
             config,
             handler,
             stream,
+            publisher,
             outcomes: Vec::new(),
         }
     }
@@ -333,6 +346,16 @@ impl<S: StreamConsumer> CommandConsumer<S> {
         &mut self.stream
     }
 
+    /// Returns an immutable reference to the projection stream publisher.
+    pub fn publisher(&self) -> &P {
+        &self.publisher
+    }
+
+    /// Returns a mutable reference to the projection stream publisher.
+    pub fn publisher_mut(&mut self) -> &mut P {
+        &mut self.publisher
+    }
+
     /// Returns all processed command outcomes.
     pub fn outcomes(&self) -> &[CommandOutcome] {
         &self.outcomes
@@ -344,7 +367,8 @@ impl<S: StreamConsumer> CommandConsumer<S> {
     }
 
     /// Processes a single received message: deserializes JSON payload, dispatches to handler,
-    /// logs results, and acknowledges the message offset.
+    /// publishes consolidated state projection upon successful mutation, logs results, and
+    /// acknowledges the message offset.
     pub async fn process_message(
         &mut self,
         message: ReceivedMessage,
@@ -387,6 +411,65 @@ impl<S: StreamConsumer> CommandConsumer<S> {
                     order_id = %order_id,
                     "Command executed successfully"
                 );
+
+                // Story 7.3: Extract credit_delta and publish verified projection to topic_orders_consolidated
+                let credit_delta = match &event {
+                    DomainEvent::CreditIssued(ref e) => e.amount_cents,
+                    _ => 0,
+                };
+
+                let agg = self.handler.get_aggregate(&order_id).ok_or_else(|| {
+                    tracing::error!(
+                        order_id = %order_id,
+                        "Aggregate missing from repository after successful command execution"
+                    );
+                    DomainError::OrderNotFound(order_id.clone())
+                })?;
+
+                let projection = ConsolidatedOrderProjection::from_aggregate(
+                    agg,
+                    credit_delta,
+                    event.timestamp(),
+                );
+                let payload = projection.to_json_bytes()?;
+
+                // Bounded retry with backoff for transient streaming publisher errors
+                let mut attempts = 0;
+                let published_offset = loop {
+                    match self
+                        .publisher
+                        .publish(&self.config.topic_orders_consolidated, &order_id, &payload)
+                        .await
+                    {
+                        Ok(off) => break off,
+                        Err(err) if attempts < 3 => {
+                            attempts += 1;
+                            warn!(
+                                order_id = %order_id,
+                                attempt = attempts,
+                                error = %err,
+                                "Retrying transient publisher error"
+                            );
+                            tokio::time::sleep(Duration::from_millis(20 * attempts as u64)).await;
+                        }
+                        Err(err) => {
+                            // Roll back aggregate and command idempotency marker so stream redelivery can cleanly re-execute
+                            self.handler.rollback_last_event(&order_id, &command_id);
+                            return Err(err);
+                        }
+                    }
+                };
+
+                info!(
+                    partition_id = partition_id,
+                    order_id = %order_id,
+                    topic = %self.config.topic_orders_consolidated,
+                    offset = published_offset,
+                    credit_issued = agg.courtesy_credit_cents,
+                    credit_delta = credit_delta,
+                    "Published consolidated order projection snapshot"
+                );
+
                 CommandOutcome::Success {
                     offset,
                     partition_id,
@@ -431,6 +514,9 @@ impl<S: StreamConsumer> CommandConsumer<S> {
 
         // 3. Acknowledge offset to maintain stream progress
         self.stream.acknowledge(partition_id, offset).await?;
+        if self.outcomes.len() >= 1000 {
+            self.outcomes.drain(0..100);
+        }
         self.outcomes.push(outcome.clone());
 
         Ok(outcome)

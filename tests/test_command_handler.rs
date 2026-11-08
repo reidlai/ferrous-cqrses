@@ -411,7 +411,7 @@ async fn test_command_consumer_stream_processing() {
     mock_stream.enqueue(ReceivedMessage::from_command(3, 1, &cmd4).unwrap());
     mock_stream.enqueue(ReceivedMessage::from_command(4, 0, &cmd5).unwrap());
 
-    let mut consumer = CommandConsumer::new(config, mock_stream);
+    let mut consumer = CommandConsumer::new(config, mock_stream, InMemoryStreamPublisher::new());
     let processed_count = consumer
         .process_all_available()
         .await
@@ -473,7 +473,7 @@ async fn test_command_consumer_deserialization_error_resilience() {
     ));
     mock_stream.enqueue(ReceivedMessage::from_command(2, 0, &valid_cmd2).unwrap());
 
-    let mut consumer = CommandConsumer::new(config, mock_stream);
+    let mut consumer = CommandConsumer::new(config, mock_stream, InMemoryStreamPublisher::new());
     let count = consumer.process_all_available().await.unwrap();
     assert_eq!(count, 3);
 
@@ -503,7 +503,8 @@ async fn test_command_consumer_deserialization_error_resilience() {
 async fn test_command_consumer_graceful_shutdown() {
     let config = Config::default();
     let mock_stream = InMemoryStreamConsumer::new();
-    let mut consumer = CommandConsumer::new(config, mock_stream);
+    let mock_publisher = InMemoryStreamPublisher::new();
+    let mut consumer = CommandConsumer::new(config, mock_stream, mock_publisher);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -533,6 +534,7 @@ async fn test_config_parsing_and_defaults() {
     assert_eq!(default_config.iggy_password, "iggy");
     assert_eq!(default_config.stream_name, "orders");
     assert_eq!(default_config.topic_orders_intake, "intake");
+    assert_eq!(default_config.topic_orders_consolidated, "consolidated");
     assert_eq!(default_config.consumer_group, "cg-cmd-handler");
 
     // CLI argument parsing test
@@ -544,6 +546,8 @@ async fn test_config_parsing_and_defaults() {
         "custom_stream",
         "--topic-orders-intake",
         "custom_intake",
+        "--topic-orders-consolidated",
+        "custom_consolidated",
         "--consumer-group",
         "custom_cg",
     ];
@@ -551,6 +555,7 @@ async fn test_config_parsing_and_defaults() {
     assert_eq!(parsed.iggy_server_address, "10.0.0.5:8090");
     assert_eq!(parsed.stream_name, "custom_stream");
     assert_eq!(parsed.topic_orders_intake, "custom_intake");
+    assert_eq!(parsed.topic_orders_consolidated, "custom_consolidated");
     assert_eq!(parsed.consumer_group, "custom_cg");
 }
 
@@ -617,7 +622,7 @@ async fn test_command_consumer_domain_rejection_resilience() {
     mock_stream.enqueue(ReceivedMessage::from_command(1, 0, &cmd2).unwrap());
     mock_stream.enqueue(ReceivedMessage::from_command(2, 0, &cmd3).unwrap());
 
-    let mut consumer = CommandConsumer::new(config, mock_stream);
+    let mut consumer = CommandConsumer::new(config, mock_stream, InMemoryStreamPublisher::new());
     let count = consumer.process_all_available().await.unwrap();
     assert_eq!(count, 3);
 
@@ -672,7 +677,7 @@ async fn test_command_consumer_duplicate_command_idempotent_handling() {
     mock_stream.enqueue(ReceivedMessage::from_command(0, 2, &cmd1).unwrap());
     mock_stream.enqueue(ReceivedMessage::from_command(1, 2, &cmd1).unwrap());
 
-    let mut consumer = CommandConsumer::new(config, mock_stream);
+    let mut consumer = CommandConsumer::new(config, mock_stream, InMemoryStreamPublisher::new());
     let count = consumer.process_all_available().await.unwrap();
     assert_eq!(count, 2);
 

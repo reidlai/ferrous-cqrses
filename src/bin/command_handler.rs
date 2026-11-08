@@ -1,5 +1,6 @@
 use clap::Parser;
 use ferrous_cqrses::consumer::{CommandConsumer, Config, IggyStreamConsumer};
+use ferrous_cqrses::publisher::IggyStreamPublisher;
 use tracing::info;
 
 #[tokio::main]
@@ -66,7 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let stream = IggyStreamConsumer::new(config.clone());
-    let mut consumer = CommandConsumer::new(config, stream);
+    let publisher = IggyStreamPublisher::new(config.clone());
+    let mut consumer = CommandConsumer::new(config, stream, publisher);
 
     info!("Command consumer loop initialized; awaiting incoming commands");
     consumer.run_loop(shutdown_rx).await?;
