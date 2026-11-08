@@ -1,13 +1,15 @@
 //! # ferrous-cqrses
 //!
 //! Pure-Rust dual-role CQRS and event sourcing core crate providing shared domain contracts,
-//! strongly typed command events, aggregate state models, and serialization utilities for
-//! the FerrousCX enterprise platform.
+//! strongly typed command events, aggregate state models, serialization utilities, and
+//! sequential command handler daemon services for the FerrousCX enterprise platform.
 
 pub mod aggregate;
 pub mod commands;
+pub mod consumer;
 pub mod error;
 pub mod events;
+pub mod handler;
 pub mod id;
 pub mod serialization;
 
@@ -18,11 +20,16 @@ pub use aggregate::{
 pub use commands::{
     CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
 };
+pub use consumer::{
+    CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
+    ReceivedMessage, StreamConsumer,
+};
 pub use error::{DomainError, InvariantError};
 pub use events::{
     CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderEvent,
     OrderStatusUpdatedEvent,
 };
+pub use handler::CommandHandler;
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 
@@ -34,11 +41,16 @@ pub mod prelude {
     pub use crate::commands::{
         CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
     };
+    pub use crate::consumer::{
+        CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
+        ReceivedMessage, StreamConsumer,
+    };
     pub use crate::error::{DomainError, InvariantError};
     pub use crate::events::{
         CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderEvent,
         OrderStatusUpdatedEvent,
     };
+    pub use crate::handler::CommandHandler;
     pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 }

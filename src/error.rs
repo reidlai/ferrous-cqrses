@@ -30,8 +30,14 @@ pub enum DomainError {
     #[error("Order has already been delivered")]
     OrderDelivered,
 
+    #[error("Order '{0}' not found")]
+    OrderNotFound(String),
+
     #[error("Order '{0}' already exists")]
     OrderAlreadyExists(String),
+
+    #[error("Duplicate command ID: {0}")]
+    DuplicateCommand(uuid::Uuid),
 
     #[error("Order ID mismatch: expected '{expected}', actual '{actual}'")]
     OrderIdMismatch { expected: String, actual: String },
