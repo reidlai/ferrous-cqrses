@@ -10,10 +10,10 @@
 //! - Stream processing, offset acknowledgement, and error handling via `CommandConsumer`
 //! - Graceful shutdown and configuration parsing
 
-use std::time::Duration;
 use chrono::Utc;
 use clap::Parser;
 use ferrous_cqrses::prelude::*;
+use std::time::Duration;
 use tokio::sync::watch;
 
 #[tokio::test]
@@ -36,7 +36,9 @@ async fn test_sequential_command_handling_per_order() {
     assert_eq!(event1.order_id(), order_id);
     assert_eq!(event1.version(), 1);
 
-    let agg = handler.get_aggregate(order_id).expect("Aggregate must exist");
+    let agg = handler
+        .get_aggregate(order_id)
+        .expect("Aggregate must exist");
     assert_eq!(agg.status, OrderStatus::Created);
     assert_eq!(agg.version, 1);
     assert_eq!(agg.courtesy_credit_cents, 0);
@@ -53,7 +55,9 @@ async fn test_sequential_command_handling_per_order() {
         .expect("First credit must succeed");
 
     assert_eq!(event2.version(), 2);
-    let agg = handler.get_aggregate(order_id).expect("Aggregate must exist");
+    let agg = handler
+        .get_aggregate(order_id)
+        .expect("Aggregate must exist");
     assert_eq!(agg.version, 2);
     assert_eq!(agg.courtesy_credit_cents, 500);
 
@@ -69,7 +73,9 @@ async fn test_sequential_command_handling_per_order() {
         .expect("Second credit must succeed");
 
     assert_eq!(event3.version(), 3);
-    let agg = handler.get_aggregate(order_id).expect("Aggregate must exist");
+    let agg = handler
+        .get_aggregate(order_id)
+        .expect("Aggregate must exist");
     assert_eq!(agg.version, 3);
     assert_eq!(agg.courtesy_credit_cents, 1300);
 
@@ -84,7 +90,9 @@ async fn test_sequential_command_handling_per_order() {
         .expect("CancelOrder must succeed");
 
     assert_eq!(event4.version(), 4);
-    let agg = handler.get_aggregate(order_id).expect("Aggregate must exist");
+    let agg = handler
+        .get_aggregate(order_id)
+        .expect("Aggregate must exist");
     assert_eq!(agg.version, 4);
     assert_eq!(agg.status, OrderStatus::Cancelled);
 
@@ -488,10 +496,7 @@ async fn test_command_consumer_deserialization_error_resilience() {
 
     // All offsets acknowledged despite corrupted payload
     assert_eq!(consumer.stream().acknowledged_offsets(), vec![0, 1, 2]);
-    assert_eq!(
-        consumer.stream().acknowledged(),
-        &[(0, 0), (0, 1), (0, 2)]
-    );
+    assert_eq!(consumer.stream().acknowledged(), &[(0, 0), (0, 1), (0, 2)]);
 
     // Aggregate still processed the two valid commands cleanly
     let agg = consumer.handler().get_aggregate("ORD-RESIL-1").unwrap();
@@ -508,9 +513,7 @@ async fn test_command_consumer_graceful_shutdown() {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let loop_handle = tokio::spawn(async move {
-        consumer.run_loop(shutdown_rx).await
-    });
+    let loop_handle = tokio::spawn(async move { consumer.run_loop(shutdown_rx).await });
 
     // Let the loop run briefly
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -716,10 +719,8 @@ async fn test_command_handler_order_not_found_errors() {
     );
 
     // Cancelling non-existent order
-    let cancel_cmd = OrderCommand::CancelOrder(CancelOrderCommand::new(
-        "ORD-NONEXISTENT",
-        "Cancel",
-    ));
+    let cancel_cmd =
+        OrderCommand::CancelOrder(CancelOrderCommand::new("ORD-NONEXISTENT", "Cancel"));
     let err2 = handler.handle_command(cancel_cmd).await.unwrap_err();
     assert_eq!(
         err2,
@@ -758,12 +759,8 @@ async fn test_command_handler_empty_ids_and_negative_freight_rejected() {
     let mut handler = CommandHandler::new();
 
     // Empty order_id
-    let empty_order_cmd = OrderCommand::CreateOrder(CreateOrderCommand::new(
-        "   ",
-        "CUST-1",
-        1000,
-        Utc::now(),
-    ));
+    let empty_order_cmd =
+        OrderCommand::CreateOrder(CreateOrderCommand::new("   ", "CUST-1", 1000, Utc::now()));
     let err1 = handler.handle_command(empty_order_cmd).await.unwrap_err();
     assert!(matches!(err1, DomainError::Generic(_)));
 

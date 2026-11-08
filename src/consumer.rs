@@ -4,12 +4,12 @@
 //! and standalone in-memory test harnesses ([`InMemoryStreamConsumer`], [`IggyStreamConsumer`])
 //! allowing pure-Rust testing without live broker dependencies.
 
-use std::collections::VecDeque;
-use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -50,7 +50,11 @@ pub struct Config {
     pub topic_orders_intake: String,
 
     /// Target consolidated order projections topic name
-    #[arg(long, env = "TOPIC_ORDERS_CONSOLIDATED", default_value = "consolidated")]
+    #[arg(
+        long,
+        env = "TOPIC_ORDERS_CONSOLIDATED",
+        default_value = "consolidated"
+    )]
     pub topic_orders_consolidated: String,
 
     /// Consumer group name for sequential partitioned consumption
@@ -155,7 +159,10 @@ impl CommandOutcome {
     }
 
     pub fn is_success(&self) -> bool {
-        matches!(self, Self::Success { .. } | Self::IdempotentDuplicate { .. })
+        matches!(
+            self,
+            Self::Success { .. } | Self::IdempotentDuplicate { .. }
+        )
     }
 
     pub fn is_rejected(&self) -> bool {
@@ -217,7 +224,10 @@ impl InMemoryStreamConsumer {
 
     /// Returns the list of acknowledged message offsets across all partitions.
     pub fn acknowledged_offsets(&self) -> Vec<u64> {
-        self.acknowledged.iter().map(|(_, offset)| *offset).collect()
+        self.acknowledged
+            .iter()
+            .map(|(_, offset)| *offset)
+            .collect()
     }
 }
 

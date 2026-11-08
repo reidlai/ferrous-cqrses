@@ -37,7 +37,10 @@ impl CommandHandler {
     /// and mutating aggregate state if permitted.
     ///
     /// Returns the resulting [`DomainEvent`] on success, or a [`DomainError`] if validation fails.
-    pub async fn handle_command(&mut self, command: OrderCommand) -> Result<DomainEvent, DomainError> {
+    pub async fn handle_command(
+        &mut self,
+        command: OrderCommand,
+    ) -> Result<DomainEvent, DomainError> {
         let command_id = command.command_id();
 
         // 1. Monotonic idempotency verification
@@ -53,9 +56,7 @@ impl CommandHandler {
         // 2. Route command based on variant
         match command {
             OrderCommand::CreateOrder(cmd) => self.handle_create_order(cmd).await,
-            OrderCommand::IssueCourtesyCredit(cmd) => {
-                self.handle_issue_courtesy_credit(cmd).await
-            }
+            OrderCommand::IssueCourtesyCredit(cmd) => self.handle_issue_courtesy_credit(cmd).await,
             OrderCommand::CancelOrder(cmd) => self.handle_cancel_order(cmd).await,
         }
     }
@@ -160,7 +161,9 @@ impl CommandHandler {
         }
 
         // Validate AD-17: Cumulative lifetime credit <= 2,000 cents ($20.00)
-        let total_credit = aggregate.courtesy_credit_cents.saturating_add(cmd.amount_cents);
+        let total_credit = aggregate
+            .courtesy_credit_cents
+            .saturating_add(cmd.amount_cents);
         if total_credit > MAX_COURTESY_CREDIT_CENTS {
             warn!(
                 "Invariant violation AD-17: courtesy credit of {} cents exceeds limit for order {}",
@@ -176,12 +179,8 @@ impl CommandHandler {
             .version
             .checked_add(1)
             .ok_or_else(|| DomainError::Generic("Aggregate version overflow".into()))?;
-        let event = CreditIssuedEvent::new(
-            &cmd.order_id,
-            cmd.amount_cents,
-            &cmd.reason,
-            next_version,
-        );
+        let event =
+            CreditIssuedEvent::new(&cmd.order_id, cmd.amount_cents, &cmd.reason, next_version);
         let domain_event = DomainEvent::CreditIssued(event);
 
         aggregate.apply(&domain_event)?;
@@ -286,12 +285,16 @@ impl CommandHandler {
         self.aggregates.insert(order_id.to_string(), aggregate);
         self.event_store
             .insert(order_id.to_string(), events.to_vec());
-        Ok(self.aggregates.get(order_id).expect("Aggregate just inserted"))
+        Ok(self
+            .aggregates
+            .get(order_id)
+            .expect("Aggregate just inserted"))
     }
 
     /// Manually inserts or overrides an aggregate in the state cache (useful for testing states).
     pub fn insert_aggregate(&mut self, aggregate: OrderAggregate) {
-        self.aggregates.insert(aggregate.order_id.clone(), aggregate);
+        self.aggregates
+            .insert(aggregate.order_id.clone(), aggregate);
     }
 
     /// Returns a reference to an aggregate by `order_id` if present in state cache.
