@@ -1,0 +1,42 @@
+# ==============================================================================
+# FerrousCX CQRS Command Handler Standalone Docker Compose Manifest
+# Adheres strictly to Tier 2 DevSecOps standards (UID 10001 rootless, Day-0 hardening)
+# ==============================================================================
+
+services:
+  command-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.command_handler
+    image: ferrous-cqrses-command-handler:latest
+    container_name: ferrous-cqrses-command-handler
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=64M
+    environment:
+      - IGGY_SERVER_ADDRESS=${IGGY_SERVER_ADDRESS:-iggy-broker:8090}
+      - IGGY_USERNAME=${IGGY_USERNAME:-iggy}
+      - IGGY_PASSWORD=${IGGY_PASSWORD:-iggy}
+      - STREAM_NAME=${STREAM_NAME:-orders}
+      - TOPIC_ORDERS_INTAKE=${TOPIC_ORDERS_INTAKE:-intake}
+      - TOPIC_ORDERS_CONSOLIDATED=${TOPIC_ORDERS_CONSOLIDATED:-consolidated}
+      - CONSUMER_GROUP=${CONSUMER_GROUP:-cg-cmd-handler}
+    healthcheck:
+      test: ["CMD", "/command_handler", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ferrous-net
+
+networks:
+  ferrous-net:
+    name: ferrous-net
+    driver: bridge
