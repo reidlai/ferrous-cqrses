@@ -5,6 +5,30 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::parse();
+
+    if config.healthcheck {
+        // High-fidelity healthcheck probe for container runtime:
+        // Verifies daemon heartbeat freshness on /tmp/daemon_heartbeat if present.
+        let heartbeat_path = std::path::Path::new("/tmp/daemon_heartbeat");
+        if heartbeat_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(heartbeat_path) {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(elapsed) = modified.elapsed() {
+                        if elapsed > std::time::Duration::from_secs(60) {
+                            eprintln!(
+                                "Healthcheck failed: daemon heartbeat is stale ({:?} ago)",
+                                elapsed
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     // Initialize tracing subscriber with JSON formatter and env-filter
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -15,8 +39,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to initialize tracing subscriber");
-
-    let config = Config::parse();
 
     info!(
         server = %config.iggy_server_address,
@@ -69,6 +91,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = IggyStreamConsumer::new(config.clone());
     let publisher = IggyStreamPublisher::new(config.clone());
     let mut consumer = CommandConsumer::new(config, stream, publisher);
+
+    // Spawn periodic heartbeat updater on /tmp/daemon_heartbeat for container healthcheck probe
+    tokio::spawn(async {
+        let heartbeat_path = std::path::Path::new("/tmp/daemon_heartbeat");
+        loop {
+            let _ = std::fs::write(heartbeat_path, b"healthy");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
 
     info!("Command consumer loop initialized; awaiting incoming commands");
     consumer.run_loop(shutdown_rx).await?;

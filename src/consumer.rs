@@ -60,6 +60,10 @@ pub struct Config {
     /// Consumer group name for sequential partitioned consumption
     #[arg(long, env = "CONSUMER_GROUP", default_value = "cg-cmd-handler")]
     pub consumer_group: String,
+
+    /// Execute static healthcheck probe and exit immediately
+    #[arg(long, default_value_t = false)]
+    pub healthcheck: bool,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             topic_orders_intake: "intake".to_string(),
             topic_orders_consolidated: "consolidated".to_string(),
             consumer_group: "cg-cmd-handler".to_string(),
+            healthcheck: false,
         }
     }
 }

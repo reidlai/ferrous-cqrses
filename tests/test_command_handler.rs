@@ -539,6 +539,7 @@ async fn test_config_parsing_and_defaults() {
     assert_eq!(default_config.topic_orders_intake, "intake");
     assert_eq!(default_config.topic_orders_consolidated, "consolidated");
     assert_eq!(default_config.consumer_group, "cg-cmd-handler");
+    assert!(!default_config.healthcheck);
 
     // CLI argument parsing test
     let args = [

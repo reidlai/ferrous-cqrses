@@ -4,3 +4,4 @@
 # Shell scripts must strictly use LF
 *.sh text eol=lf
 *.ps1 text eol=crlf
+
