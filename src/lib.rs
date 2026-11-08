@@ -1,0 +1,44 @@
+//! # ferrous-cqrses
+//!
+//! Pure-Rust dual-role CQRS and event sourcing core crate providing shared domain contracts,
+//! strongly typed command events, aggregate state models, and serialization utilities for
+//! the FerrousCX enterprise platform.
+
+pub mod aggregate;
+pub mod commands;
+pub mod error;
+pub mod events;
+pub mod id;
+pub mod serialization;
+
+// Public re-exports for canonical top-level crate consumption (AD-15)
+pub use aggregate::{
+    validate_courtesy_credit_amount, OrderAggregate, OrderStatus, MAX_COURTESY_CREDIT_CENTS,
+};
+pub use commands::{
+    CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
+};
+pub use error::{DomainError, InvariantError};
+pub use events::{
+    CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderEvent,
+    OrderStatusUpdatedEvent,
+};
+pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
+pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
+
+/// Convenience module for glob-importing all core domain contracts.
+pub mod prelude {
+    pub use crate::aggregate::{
+        validate_courtesy_credit_amount, OrderAggregate, OrderStatus, MAX_COURTESY_CREDIT_CENTS,
+    };
+    pub use crate::commands::{
+        CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
+    };
+    pub use crate::error::{DomainError, InvariantError};
+    pub use crate::events::{
+        CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderEvent,
+        OrderStatusUpdatedEvent,
+    };
+    pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
+    pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
+}
