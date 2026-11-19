@@ -61,6 +61,10 @@ pub struct Config {
     #[arg(long, env = "CONSUMER_GROUP", default_value = "cg-cmd-handler")]
     pub consumer_group: String,
 
+    /// SierraDB distributed event store TCP address
+    #[arg(long, env = "SIERRADB_URL", default_value = "127.0.0.1:9090")]
+    pub sierradb_url: String,
+
     /// Execute static healthcheck probe and exit immediately
     #[arg(long, default_value_t = false)]
     pub healthcheck: bool,
@@ -76,6 +80,7 @@ impl Default for Config {
             topic_orders_intake: "intake".to_string(),
             topic_orders_consolidated: "consolidated".to_string(),
             consumer_group: "cg-cmd-handler".to_string(),
+            sierradb_url: "127.0.0.1:9090".to_string(),
             healthcheck: false,
         }
     }

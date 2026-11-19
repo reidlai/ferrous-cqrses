@@ -14,6 +14,7 @@ pub mod id;
 pub mod projection;
 pub mod publisher;
 pub mod serialization;
+pub mod sierra;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
 pub use aggregate::{
@@ -38,6 +39,10 @@ pub use publisher::{
     IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
 };
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
+pub use sierra::{
+    deserialize_event, serialize_event, stream_id_for_order, EventStore, ExpectedVersion,
+    InMemoryEventStore, RespValue, SierraClient, SierraDbEventStore, SierraEventStore,
+};
 
 /// Convenience module for glob-importing all core domain contracts.
 pub mod prelude {
@@ -63,4 +68,8 @@ pub mod prelude {
         IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
     };
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
+    pub use crate::sierra::{
+        deserialize_event, serialize_event, stream_id_for_order, EventStore, ExpectedVersion,
+        InMemoryEventStore, RespValue, SierraClient, SierraDbEventStore, SierraEventStore,
+    };
 }

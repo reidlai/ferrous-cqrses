@@ -68,6 +68,15 @@ pub enum DomainError {
 
     #[error("Domain error: {0}")]
     Generic(String),
+
+    #[error("SierraDB error: {0}")]
+    Sierra(String),
+}
+
+impl From<std::io::Error> for DomainError {
+    fn from(err: std::io::Error) -> Self {
+        DomainError::Sierra(err.to_string())
+    }
 }
 
 impl From<serde_json::Error> for DomainError {
