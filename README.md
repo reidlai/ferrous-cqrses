@@ -8,8 +8,9 @@
 [![Pre-Commit Enabled](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](.pre-commit-config.yaml)
 [![Pattern: CQRS + Event Sourcing](https://img.shields.io/badge/pattern-CQRS%20%2B%20Event%20Sourcing-orange.svg)](#architecture-overview)
 
-**`ferrous-cqrses`** is the core Command-Query Responsibility Segregation and Event Sourcing (CQRS-ES) submodule of the **FerrousCX** enterprise platform. Built in pure Rust, it operates in a **dual-role architecture**:
+**`ferrous-cqrses`** is the core Command-Query Responsibility Segregation and Event Sourcing (CQRS-ES) submodule of the **FerrousCX** enterprise platform. Built in pure Rust, it operates in a **dual-sided architecture** encompassing both Command Mutation and Query Serving:
 
+### A. Command Side (Write Path & Domain Invariants)
 1. **Rust Library Crate (`src/lib.rs`):**  
    Exports strongly typed **Command Events** (`CreateOrderCommand`, `IssueCourtesyCreditCommand`, `CancelOrderCommand`), **Domain Events** (`OrderCreatedEvent`, `CreditIssuedEvent`, `OrderCancelledEvent`, `OrderStatusUpdatedEvent`), payload serialization contracts (Serde JSON and Bincode), and domain invariant rules.  
    - **Consumer:** Submodule **`ferrous-api`** imports `ferrous-cqrses` as a compiled crate dependency. Inside its Axum API handlers, `ferrous-api` instantiates typed Command Events from incoming HTTP requests and publishes them directly to the event intake topic (`orders/intake`) managed by **`ferrous-streaming`**.
@@ -20,6 +21,12 @@
    - Enforces all business invariants: strict **$20.00 / 2,000 cents courtesy credit cap (AD-17)**, lifecycle state transition guards, and monotonic `UUIDv7` idempotency deduplication.
    - Emits validated state snapshots as **`ConsolidatedOrderProjection`** records to the outbound topic (`orders/consolidated`).
    - Downstream stream processors (e.g. **Arroyo**) consume projections and commit materialized views to **Delta Lake** (`orders_current_state` and `orders_raw_events`) via 2PC Parquet commits.
+
+### B. Query Side (Read Path & Analytical Serving)
+3. **DataFusion Analytical Query Engine (`query-service`):**  
+   Standalone vectorized query service and embedded Lakehouse query runtime powered by **Apache DataFusion** and `delta-rs`:
+   - Executes sub-3ms analytical queries over materialized Delta Lake read models (`orders_current_state`, `orders_raw_events`, and historical `olist_*` tables).
+   - Exposes **Arrow Flight SQL** (port `50051`) for high-throughput binary Arrow streaming and **HTTP REST** (port `8085`) for interactive SQL queries (`/api/v1/query`), catalog introspection, and health monitoring.
 
 ---
 
@@ -65,11 +72,17 @@ flowchart TD
     IggyIntake -->|Read partitioned stream| StreamConsumer
     ProjectionEmitter -->|5. Publish Projection Event| IggyConsolidated
 
-    subgraph Downstream_Sinks ["Downstream Analytics & Lakehouse"]
+    subgraph Downstream_Sinks ["Downstream Lakehouse Storage"]
         Arroyo["Arroyo Stream Processing Engine"]
         DeltaLake[("Delta Lake<br/>orders_current_state & orders_raw_events")]
         IggyConsolidated -->|Stream ingestion| Arroyo
         Arroyo -->|2PC Parquet Commit| DeltaLake
+    end
+
+    subgraph Query_Service ["ferrous-cqrses Query Engine (query-service)"]
+        DataFusionEngine["Apache DataFusion Runtime<br/>• Flight SQL (:50051)<br/>• REST / Metrics (:8085)"]
+        DeltaLake -->|Vectorized Zero-Copy Scan| DataFusionEngine
+        DataFusionEngine -->|Sub-3ms Analytical Queries| APIHandler
     end
 ```
 
@@ -88,6 +101,11 @@ flowchart TD
 * **Idempotent Ingestion:** Rejects replayed commands using monotonic `UUIDv7` command identifiers without duplicating state changes or publishing redundant projections.
 * **Projection Publishing:** Emits lightweight `ConsolidatedOrderProjection` state payloads to `orders/consolidated` for downstream consumption by Arroyo and Delta Lake.
 * **Graceful Lifecycle Management:** Traps `SIGINT`/`SIGTERM`/`Ctrl+C` signals to drain active partition buffers and cleanly terminate background tasks.
+
+### 3. Vectorized Analytical Query Engine (Query-Side Service)
+* **Apache DataFusion Vectorized Engine:** Executes sub-3ms analytical SQL queries directly against Delta Lake transactional stores (`orders_current_state`, `orders_raw_events`) and historical tables (`olist_*`) via `delta-rs`.
+* **Arrow Flight SQL Endpoint (`50051`):** High-throughput binary Arrow streaming protocol for distributed query planners and business intelligence tools.
+* **REST & Telemetry API (`8085`):** Interactive SQL query endpoint (`/api/v1/query`), catalog introspection (`/api/v1/catalog/tables`), health checking (`/health`), and latency metrics.
 
 ---
 
