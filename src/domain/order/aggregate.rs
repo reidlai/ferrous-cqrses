@@ -2,10 +2,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
-use crate::events::{CreditIssuedEvent, DomainEvent};
+use crate::events::{
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreditIssuedEvent, DomainEvent,
+};
 
 /// Maximum courtesy credit ceiling permitted per order: $20.00 (2,000 cents).
 pub const MAX_COURTESY_CREDIT_CENTS: i64 = 2000;
+
+/// Operational status of courtesy credit settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditSettlementStatus {
+    #[default]
+    None,
+    PendingSettlement,
+    PartiallySettled,
+    Settled,
+    SettlementFailed,
+}
 
 /// Order lifecycle operational statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -41,6 +55,8 @@ pub struct OrderAggregate {
     pub status: OrderStatus,
     pub total_freight_cents: i64,
     pub courtesy_credit_cents: i64,
+    pub settled_credit_cents: i64,
+    pub settlement_status: CreditSettlementStatus,
     pub delivery_sla: DateTime<Utc>,
     pub actual_delivery: Option<DateTime<Utc>>,
     pub version: u64,
@@ -54,6 +70,8 @@ impl Default for OrderAggregate {
             status: OrderStatus::Created,
             total_freight_cents: 0,
             courtesy_credit_cents: 0,
+            settled_credit_cents: 0,
+            settlement_status: CreditSettlementStatus::None,
             delivery_sla: DateTime::UNIX_EPOCH,
             actual_delivery: None,
             version: 0,
@@ -75,6 +93,8 @@ impl OrderAggregate {
             status: OrderStatus::Created,
             total_freight_cents,
             courtesy_credit_cents: 0,
+            settled_credit_cents: 0,
+            settlement_status: CreditSettlementStatus::None,
             delivery_sla,
             actual_delivery: None,
             version: 0,
@@ -105,6 +125,60 @@ impl OrderAggregate {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Validates whether a courtesy credit settlement can be executed:
+    /// 1. Order must not be cancelled.
+    /// 2. Order must not be fraud-locked.
+    /// 3. Settlement amount must be strictly positive.
+    /// 4. Settled credit plus new amount must not exceed courtesy_credit_cents.
+    pub fn validate_courtesy_credit_settlement(&self, amount_cents: i64) -> Result<(), DomainError> {
+        if self.status == OrderStatus::Cancelled {
+            return Err(DomainError::OrderCancelled);
+        }
+        if self.status == OrderStatus::FraudLocked {
+            return Err(DomainError::OrderFraudLocked);
+        }
+        if amount_cents <= 0 {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
+
+        let total_settled = self.settled_credit_cents.saturating_add(amount_cents);
+        if total_settled > self.courtesy_credit_cents {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
+
+        Ok(())
+    }
+
+    /// Validates whether a courtesy credit settlement failure can be recorded:
+    /// 1. Order must not be cancelled.
+    /// 2. Order must not be fraud-locked.
+    /// 3. Failure amount must be strictly positive.
+    /// 4. Order must have non-zero courtesy credit issued.
+    /// 5. Order must not be already fully settled.
+    /// 6. Failure amount must not exceed remaining unsettled credit.
+    pub fn validate_fail_courtesy_credit_settlement(&self, amount_cents: i64) -> Result<(), DomainError> {
+        if self.status == OrderStatus::Cancelled {
+            return Err(DomainError::OrderCancelled);
+        }
+        if self.status == OrderStatus::FraudLocked {
+            return Err(DomainError::OrderFraudLocked);
+        }
+        if amount_cents <= 0 {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
+        if self.courtesy_credit_cents <= 0 {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
+        if self.settled_credit_cents >= self.courtesy_credit_cents {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
+        let remaining_unsettled = self.courtesy_credit_cents - self.settled_credit_cents;
+        if amount_cents > remaining_unsettled {
+            return Err(DomainError::InvalidAmount(amount_cents));
+        }
         Ok(())
     }
 
@@ -143,6 +217,7 @@ impl OrderAggregate {
                 self.validate_courtesy_credit(e.amount_cents)?;
                 self.courtesy_credit_cents =
                     self.courtesy_credit_cents.saturating_add(e.amount_cents);
+                self.settlement_status = CreditSettlementStatus::PendingSettlement;
                 self.version = e.version;
                 Ok(())
             }
@@ -174,12 +249,46 @@ impl OrderAggregate {
                 self.version = _e.version;
                 Ok(())
             }
+            DomainEvent::CourtesyCreditSettled(e) => {
+                self.validate_courtesy_credit_settlement(e.amount_cents)?;
+                self.settled_credit_cents =
+                    self.settled_credit_cents.saturating_add(e.amount_cents);
+                if self.settled_credit_cents >= self.courtesy_credit_cents {
+                    self.settlement_status = CreditSettlementStatus::Settled;
+                } else {
+                    self.settlement_status = CreditSettlementStatus::PartiallySettled;
+                }
+                self.version = e.version;
+                Ok(())
+            }
+            DomainEvent::CourtesyCreditSettlementFailed(e) => {
+                self.validate_fail_courtesy_credit_settlement(e.amount_cents)?;
+                self.settlement_status = CreditSettlementStatus::SettlementFailed;
+                self.version = e.version;
+                Ok(())
+            }
         }
     }
 
     /// Applies a typed CreditIssuedEvent directly, validating invariants and incrementing version.
     pub fn apply_credit_issued(&mut self, event: &CreditIssuedEvent) -> Result<(), DomainError> {
         self.apply(&DomainEvent::CreditIssued(event.clone()))
+    }
+
+    /// Applies a typed CourtesyCreditSettledEvent directly, validating invariants and incrementing version.
+    pub fn apply_courtesy_credit_settled(
+        &mut self,
+        event: &CourtesyCreditSettledEvent,
+    ) -> Result<(), DomainError> {
+        self.apply(&DomainEvent::CourtesyCreditSettled(event.clone()))
+    }
+
+    /// Applies a typed CourtesyCreditSettlementFailedEvent directly, validating invariants and incrementing version.
+    pub fn apply_courtesy_credit_settlement_failed(
+        &mut self,
+        event: &CourtesyCreditSettlementFailedEvent,
+    ) -> Result<(), DomainError> {
+        self.apply(&DomainEvent::CourtesyCreditSettlementFailed(event.clone()))
     }
 
     /// Rehydrates an order aggregate from a sequential stream of domain events.

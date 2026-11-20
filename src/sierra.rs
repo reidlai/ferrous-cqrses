@@ -10,7 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::DomainError;
 use crate::events::{
-    CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderStatusUpdatedEvent,
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreditIssuedEvent, DomainEvent,
+    OrderCancelledEvent, OrderCreatedEvent, OrderStatusUpdatedEvent,
 };
 
 /// Strongly typed RESP3 frame representation.
@@ -364,6 +365,14 @@ pub fn serialize_event(event: &DomainEvent) -> Result<(&'static str, String), Do
             let json = serde_json::to_string(e)?;
             Ok(("OrderCancelled", json))
         }
+        DomainEvent::CourtesyCreditSettled(e) => {
+            let json = serde_json::to_string(e)?;
+            Ok(("CourtesyCreditSettled", json))
+        }
+        DomainEvent::CourtesyCreditSettlementFailed(e) => {
+            let json = serde_json::to_string(e)?;
+            Ok(("CourtesyCreditSettlementFailed", json))
+        }
     }
 }
 
@@ -395,6 +404,18 @@ pub fn deserialize_event(event_name: &str, payload: &str) -> Result<DomainEvent,
             let inner: OrderCancelledEvent = serde_json::from_str(payload)
                 .map_err(|e| DomainError::DeserializationError(e.to_string()))?;
             Ok(DomainEvent::OrderCancelled(inner))
+        }
+        "CourtesyCreditSettled" | "CourtesyCreditSettledEvent" | "courtesy_credit_settled" => {
+            let inner: CourtesyCreditSettledEvent = serde_json::from_str(payload)
+                .map_err(|e| DomainError::DeserializationError(e.to_string()))?;
+            Ok(DomainEvent::CourtesyCreditSettled(inner))
+        }
+        "CourtesyCreditSettlementFailed"
+        | "CourtesyCreditSettlementFailedEvent"
+        | "courtesy_credit_settlement_failed" => {
+            let inner: CourtesyCreditSettlementFailedEvent = serde_json::from_str(payload)
+                .map_err(|e| DomainError::DeserializationError(e.to_string()))?;
+            Ok(DomainEvent::CourtesyCreditSettlementFailed(inner))
         }
         other => Err(DomainError::DeserializationError(format!(
             "Unknown domain event name: {other}"

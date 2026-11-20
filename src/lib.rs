@@ -28,15 +28,18 @@ pub mod consumer;
 pub mod id;
 pub mod projection;
 pub mod publisher;
+pub mod saga;
 pub mod serialization;
 pub mod sierra;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
 pub use domain::order::{
-    validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler, CreateOrderCommand,
-    CreditIssuedEvent, DomainError, DomainEvent, InvariantError, IssueCourtesyCreditCommand,
-    OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderStatus,
-    OrderStatusUpdatedEvent, MAX_COURTESY_CREDIT_CENTS,
+    validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+    CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
+    FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand, OrderAggregate,
+    OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderStatus,
+    OrderStatusUpdatedEvent, SettleCourtesyCreditCommand, MAX_COURTESY_CREDIT_CENTS,
 };
 pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
@@ -47,6 +50,11 @@ pub use projection::ConsolidatedOrderProjection;
 pub use publisher::{
     IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
 };
+pub use saga::{
+    EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
+    HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
+    OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
+};
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 pub use sierra::{
     deserialize_event, serialize_event, stream_id_for_order, EventStore, ExpectedVersion,
@@ -56,10 +64,13 @@ pub use sierra::{
 /// Convenience module for glob-importing all core domain contracts and infrastructure interfaces.
 pub mod prelude {
     pub use crate::domain::order::{
-        validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler, CreateOrderCommand,
-        CreditIssuedEvent, DomainError, DomainEvent, InvariantError, IssueCourtesyCreditCommand,
+        validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
+        CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+        CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
+        FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand,
         OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent,
-        OrderStatus, OrderStatusUpdatedEvent, MAX_COURTESY_CREDIT_CENTS,
+        OrderStatus, OrderStatusUpdatedEvent, SettleCourtesyCreditCommand,
+        MAX_COURTESY_CREDIT_CENTS,
     };
     pub use crate::consumer::{
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
@@ -69,6 +80,11 @@ pub mod prelude {
     pub use crate::projection::ConsolidatedOrderProjection;
     pub use crate::publisher::{
         IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
+    };
+    pub use crate::saga::{
+        EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
+        HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
+        OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
     };
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
     pub use crate::sierra::{

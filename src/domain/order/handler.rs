@@ -12,10 +12,14 @@ use uuid::Uuid;
 
 use crate::aggregate::{OrderAggregate, OrderStatus, MAX_COURTESY_CREDIT_CENTS};
 use crate::commands::{
-    CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
+    CancelOrderCommand, CreateOrderCommand, FailCourtesyCreditSettlementCommand,
+    IssueCourtesyCreditCommand, OrderCommand, SettleCourtesyCreditCommand,
 };
 use crate::error::DomainError;
-use crate::events::{CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent};
+use crate::events::{
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreditIssuedEvent, DomainEvent,
+    OrderCancelledEvent, OrderCreatedEvent,
+};
 use crate::sierra::{
     stream_id_for_order, EventStore, ExpectedVersion, InMemoryEventStore, SierraDbEventStore,
 };
@@ -110,6 +114,10 @@ impl CommandHandler {
             OrderCommand::CreateOrder(cmd) => self.handle_create_order(cmd).await,
             OrderCommand::IssueCourtesyCredit(cmd) => self.handle_issue_courtesy_credit(cmd).await,
             OrderCommand::CancelOrder(cmd) => self.handle_cancel_order(cmd).await,
+            OrderCommand::SettleCourtesyCredit(cmd) => self.handle_settle_courtesy_credit(cmd).await,
+            OrderCommand::FailCourtesyCreditSettlement(cmd) => {
+                self.handle_fail_courtesy_credit_settlement(cmd).await
+            }
         }
     }
 
@@ -353,6 +361,144 @@ impl CommandHandler {
             order_id = %cmd.order_id,
             version = aggregate.version,
             "Successfully cancelled order"
+        );
+
+        Ok(domain_event)
+    }
+
+    /// Processes a [`SettleCourtesyCreditCommand`].
+    async fn handle_settle_courtesy_credit(
+        &mut self,
+        cmd: SettleCourtesyCreditCommand,
+    ) -> Result<DomainEvent, DomainError> {
+        let command_id = cmd.command_id;
+
+        self.ensure_aggregate_loaded(&cmd.order_id).await?;
+
+        let aggregate = match self.aggregates.get_mut(&cmd.order_id) {
+            Some(agg) => agg,
+            None => {
+                warn!(order_id = %cmd.order_id, "SettleCourtesyCredit rejected: order not found");
+                return Err(DomainError::OrderNotFound(cmd.order_id));
+            }
+        };
+
+        aggregate.validate_courtesy_credit_settlement(cmd.amount_cents)?;
+
+        let next_version = aggregate
+            .version
+            .checked_add(1)
+            .ok_or_else(|| DomainError::Generic("Aggregate version overflow".into()))?;
+        let event = CourtesyCreditSettledEvent::new(
+            &cmd.order_id,
+            cmd.amount_cents,
+            &cmd.transaction_ref,
+            next_version,
+        );
+        let domain_event = DomainEvent::CourtesyCreditSettled(event);
+
+        let expected_version = if aggregate.version == 0 {
+            ExpectedVersion::Empty
+        } else {
+            ExpectedVersion::Exact(aggregate.version - 1)
+        };
+
+        let stream_id = stream_id_for_order(&cmd.order_id);
+        if let Err(e) = self
+            .event_store
+            .append(&stream_id, &domain_event, expected_version)
+            .await
+        {
+            if matches!(e, DomainError::VersionMismatch { .. }) {
+                self.aggregates.remove(&cmd.order_id);
+                self.event_cache.remove(&cmd.order_id);
+            }
+            return Err(e);
+        }
+
+        aggregate.apply(&domain_event)?;
+
+        self.event_cache
+            .entry(cmd.order_id.clone())
+            .or_default()
+            .push(domain_event.clone());
+        self.processed_commands.insert(command_id);
+
+        info!(
+            command_id = %command_id,
+            order_id = %cmd.order_id,
+            amount_cents = cmd.amount_cents,
+            settled_credit_cents = aggregate.settled_credit_cents,
+            version = aggregate.version,
+            "Successfully settled courtesy credit"
+        );
+
+        Ok(domain_event)
+    }
+
+    /// Processes a [`FailCourtesyCreditSettlementCommand`].
+    async fn handle_fail_courtesy_credit_settlement(
+        &mut self,
+        cmd: FailCourtesyCreditSettlementCommand,
+    ) -> Result<DomainEvent, DomainError> {
+        let command_id = cmd.command_id;
+
+        self.ensure_aggregate_loaded(&cmd.order_id).await?;
+
+        let aggregate = match self.aggregates.get_mut(&cmd.order_id) {
+            Some(agg) => agg,
+            None => {
+                warn!(order_id = %cmd.order_id, "FailCourtesyCreditSettlement rejected: order not found");
+                return Err(DomainError::OrderNotFound(cmd.order_id));
+            }
+        };
+
+        aggregate.validate_fail_courtesy_credit_settlement(cmd.amount_cents)?;
+
+        let next_version = aggregate
+            .version
+            .checked_add(1)
+            .ok_or_else(|| DomainError::Generic("Aggregate version overflow".into()))?;
+        let event = CourtesyCreditSettlementFailedEvent::new(
+            &cmd.order_id,
+            cmd.amount_cents,
+            &cmd.reason,
+            next_version,
+        );
+        let domain_event = DomainEvent::CourtesyCreditSettlementFailed(event);
+
+        let expected_version = if aggregate.version == 0 {
+            ExpectedVersion::Empty
+        } else {
+            ExpectedVersion::Exact(aggregate.version - 1)
+        };
+
+        let stream_id = stream_id_for_order(&cmd.order_id);
+        if let Err(e) = self
+            .event_store
+            .append(&stream_id, &domain_event, expected_version)
+            .await
+        {
+            if matches!(e, DomainError::VersionMismatch { .. }) {
+                self.aggregates.remove(&cmd.order_id);
+                self.event_cache.remove(&cmd.order_id);
+            }
+            return Err(e);
+        }
+
+        aggregate.apply(&domain_event)?;
+
+        self.event_cache
+            .entry(cmd.order_id.clone())
+            .or_default()
+            .push(domain_event.clone());
+        self.processed_commands.insert(command_id);
+
+        info!(
+            command_id = %command_id,
+            order_id = %cmd.order_id,
+            version = aggregate.version,
+            "Successfully recorded courtesy credit settlement failure"
         );
 
         Ok(domain_event)
