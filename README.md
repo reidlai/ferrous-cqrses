@@ -108,10 +108,80 @@ flowchart TD
 * **Projection Publishing:** Emits lightweight `ConsolidatedOrderProjection` state payloads to `orders/consolidated` for downstream consumption by Arroyo and Delta Lake.
 * **Graceful Lifecycle Management:** Traps `SIGINT`/`SIGTERM`/`Ctrl+C` signals to drain active partition buffers and cleanly terminate background tasks.
 
-### 3. Vectorized Analytical Query Engine (Query-Side Service)
+### 3. Outbound Saga Process Manager (`src/bin/order_saga.rs` & `src/saga.rs`)
+* **Decoupled Outbound Coordination:** Consumes committed domain events (`CreditIssuedEvent`) from Apache Iggy (`orders/events`) across consumer group `cg-order-saga` to orchestrate outbound integration workflows with external enterprise systems.
+* **CQRS/ES Pure Replay Invariant:** Read-side projections remain strictly side-effect free (idempotent folding without external network calls), guaranteeing that disaster recovery replays or re-indexing operations never trigger duplicate side-effects.
+* **Resilient Enterprise Dispatcher:** Implements `EnterpriseDispatcher` with HTTP bearer authentication, exponential backoff, retry limits, and correlation tokens (`EnterpriseSettlementRequest`).
+
+### 4. Asynchronous Callback Worker (`src/callback.rs`)
+* **Queue-Driven Ingress:** Replaces fragile synchronous HTTP webhooks with an asynchronous callback queue (`orders/callbacks`, consumer group `cg-order-callback`).
+* **Deterministic Idempotency:** Translates callback messages into domain commands using deterministic `UUIDv5` command identifiers, discarding duplicate responses idempotently.
+* **SierraDB Atomic Commit & Rollback:** Validates aggregate invariants against `OrderAggregate` in SierraDB, atomically commits terminal settlement events (`CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`) via `EAPPEND`, and rolls back in-memory aggregate state if post-commit event publication fails.
+
+### 5. Vectorized Analytical Query Engine (Query-Side Service)
 * **Apache DataFusion Vectorized Engine:** Executes sub-3ms analytical SQL queries directly against Delta Lake transactional stores (`orders_current_state`, `orders_raw_events`) and historical tables (`olist_*`) via `delta-rs`.
 * **Arrow Flight SQL Endpoint (`50051`):** High-throughput binary Arrow streaming protocol for distributed query planners and business intelligence tools.
 * **REST & Telemetry API (`8085`):** Interactive SQL query endpoint (`/api/v1/query`), catalog introspection (`/api/v1/catalog/tables`), health checking (`/health`), and latency metrics.
+
+---
+
+## 🔄 External Integration & Asynchronous Callback Architecture
+
+`ferrous-cqrses` provides the complete modular infrastructure for coordinating asynchronous integrations with external enterprise workflows (e.g. ERP, banking settlement, or clearing gateways) without violating event-sourcing invariants:
+
+```mermaid
+flowchart TD
+    subgraph Event_Bus ["Apache Iggy Broker (orders Stream)"]
+        IggyEvents["Topic: events / orders/events<br/>• Committed Domain Events"]
+        IggyCallbacks["Topic: callbacks / orders/callbacks<br/>• Inbound External Responses"]
+    end
+
+    subgraph Saga_Tier ["Outbound Saga Process Manager (src/bin/order_saga.rs)"]
+        OrderSaga["OrderSagaManager<br/>• Consumer Group: cg-order-saga<br/>• Consumes CreditIssuedEvent<br/>• Preserves Replay Purity"]
+        Dispatcher["EnterpriseDispatcher<br/>• HttpEnterpriseDispatcher<br/>• Exponential Backoff & Retries"]
+    end
+
+    subgraph External_Systems ["External Enterprise / Payment Systems"]
+        ExternalAPI["External ERP / Clearing Gateway<br/>(Private Enterprise Network)"]
+    end
+
+    subgraph Callback_Tier ["Inbound Callback Service (src/callback.rs)"]
+        CallbackService["CallbackService<br/>• Consumer Group: cg-order-callback<br/>• Invariant Validation & Idempotency"]
+        CmdHandler["CommandHandler<br/>• Evaluates Settle/Fail Commands<br/>• Atomically Appends (EAPPEND)"]
+    end
+
+    subgraph Storage_Tier ["Event Storage"]
+        SierraDB[("SierraDB Event Store<br/>(Port 9090)")]
+    end
+
+    %% Outbound Flow
+    IggyEvents -->|"1. Consume Event"| OrderSaga
+    OrderSaga -->|"2. Correlated Dispatch"| Dispatcher
+    Dispatcher -->|"3. Outbound Call"| ExternalAPI
+    ExternalAPI -->|"4. Async Response"| IggyCallbacks
+
+    %% Inbound Callback Flow
+    IggyCallbacks -->|"5. Consume Callback"| CallbackService
+    CallbackService -->|"6. Handle Command"| CmdHandler
+    CmdHandler <-->|"7. EAPPEND Commit"| SierraDB
+    CallbackService -->|"8. Publish Settled/Failed Event"| IggyEvents
+```
+
+### 1. Outbound Saga Process Manager (`OrderSagaManager`)
+* **Purity Guarantee:** In an event-sourced system, replaying historical events to rebuild projections or recalculate state must never produce side-effects. `order_saga` decouples side-effects into a dedicated process manager listening to `orders/events` under consumer group `cg-order-saga`.
+* **Outbound Contracts:** Wraps requests in strongly typed `EnterpriseSettlementRequest` envelopes carrying deterministic correlation tokens and amounts.
+* **Retry & Resilience:** `HttpEnterpriseDispatcher` intercepts transient failures (e.g., HTTP 429 rate limits, HTTP 503 service unavailable, TCP timeouts) and retries with jittered exponential backoff up to configured limits before acknowledging message offsets.
+
+### 2. Inbound Queue-Based Callback Service (`CallbackService`)
+* **Queue Ingress:** External systems post asynchronous responses back into Apache Iggy (`orders/callbacks`). The `CallbackService` ingests messages under consumer group `cg-order-callback`.
+* **Payload Invariant Validation:** Validates `SettlementCallbackMessage` structure (strictly positive amounts, required transaction references for `Settled`, mandatory reasons for `Failed`).
+* **Command Translation & Monotonic Idempotency:** Computes deterministic `UUIDv5` command identifiers:
+  - Settled: `UUIDv5(order_id:transaction_ref)`
+  - Failed: `UUIDv5(order_id:reason:amount_cents)`
+  Any redelivered message is idempotently acknowledged as `CallbackOutcome::DuplicateIgnored` without corrupting aggregate history or emitting duplicate events.
+* **SierraDB Atomic Commit (`EAPPEND`):** Rehydrates `OrderAggregate`, checks invariants (e.g. lifetime courtesy credit limit, order status not cancelled or fraud-locked), and commits `CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`.
+* **Rollback on Downstream Publishing Failure:** If publication to `orders/events` fails, `CallbackService` executes `handler.rollback_last_event(order_id, command_id)` to restore the in-memory aggregate to its prior version, allowing safe retry without state divergence.
+* **Notification Hook:** Supports optional `EventListener` callbacks (e.g., enabling upstream API gateways to broadcast real-time Server-Sent Events).
 
 ---
 
@@ -169,22 +239,30 @@ ferrous-cqrses/
 │   └── audit-cqrses.ps1            # PowerShell 100% dual-shell parity audit script
 ├── src/
 │   ├── bin/
-│   │   └── command_handler.rs      # Daemon binary entrypoint with graceful shutdown
-│   ├── aggregate.rs                # OrderAggregate state machine & AD-17 invariant rules
-│   ├── commands.rs                 # Typed Command Event schemas & UUIDv7 command IDs
-│   ├── consumer.rs                 # Sequential stream consumer & Config parsing
-│   ├── error.rs                    # DomainError & InvariantError enums
-│   ├── events.rs                   # DomainEvent variants & event sequencing
-│   ├── handler.rs                  # Sequential CommandHandler & in-memory event store
+│   │   ├── command_handler.rs      # Sequential command consumer daemon
+│   │   ├── order_handler.rs        # Standalone order mutation service
+│   │   ├── order_projection.rs     # Materialized view projection daemon
+│   │   └── order_saga.rs           # Outbound saga process manager daemon
+│   ├── callback.rs                 # Queue-based CallbackService & settlement contracts
+│   ├── consumer.rs                 # StreamConsumer, Config & Iggy consumer abstractions
+│   ├── delta.rs                    # Delta Lake Parquet snapshot commit helper (write-side)
+│   ├── domain/                     # Pure domain logic (aggregate, commands, events, handler)
 │   ├── id.rs                       # Monotonic UUIDv7 generator & parser
 │   ├── lib.rs                      # Public library exports & prelude
 │   ├── projection.rs               # ConsolidatedOrderProjection & state snapshots
 │   ├── publisher.rs                # StreamPublisher trait & Iggy/InMemory publishers
-│   └── serialization.rs            # Serde JSON & Bincode serialization utilities
+│   ├── saga.rs                     # OrderSagaManager & EnterpriseDispatcher abstractions
+│   ├── serialization.rs            # Serde JSON & Bincode serialization utilities
+│   └── sierra.rs                   # SierraDB RESP3 event store client & protocol
 ├── tests/
+│   ├── test_callback.rs            # Integration tests for CallbackService & idempotency
 │   ├── test_command_handler.rs     # Integration tests for handler & sequential processing
+│   ├── test_healthcheck.rs         # Healthcheck and CLI flag probe tests
 │   ├── test_library_contracts.rs   # Unit tests for domain models, invariants & serialization
-│   └── test_projection_publishing.rs # Tests for ConsolidatedOrderProjection publishing
+│   ├── test_order_projection.rs    # Tests for order projection materialization
+│   ├── test_order_saga.rs          # Tests for saga process manager & retry mechanics
+│   ├── test_projection_publishing.rs # Tests for ConsolidatedOrderProjection publishing
+│   └── test_sierradb_integration.rs # Tests for SierraDB event store append and scans
 └── README.md                       # Submodule architecture & technical documentation
 ```
 
@@ -210,7 +288,7 @@ cargo clippy --all-targets -- -D warnings
 
 ### 3. Run Comprehensive Test Suite
 ```bash
-# Execute all 57 unit, invariant, and integration tests
+# Execute all 121 unit, invariant, and integration tests
 cargo test --all-targets --verbose
 ```
 
