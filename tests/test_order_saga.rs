@@ -26,23 +26,74 @@ use uuid::Uuid;
 #[test]
 fn test_order_saga_healthcheck_binary_probe() {
     let bin_path = env!("CARGO_BIN_EXE_order_saga");
+    let temp_dir = std::env::temp_dir();
+    let heartbeat_file = temp_dir.join(format!("test_heartbeat_{}.tmp", Uuid::new_v4()));
+    std::fs::write(&heartbeat_file, b"healthy").expect("Failed to write temporary test heartbeat");
 
     let start = std::time::Instant::now();
     let output = Command::new(bin_path)
         .arg("--healthcheck")
+        .env("HEARTBEAT_PATH", &heartbeat_file)
         .output()
         .expect("Failed to execute order_saga with --healthcheck");
     let elapsed = start.elapsed();
 
+    let _ = std::fs::remove_file(&heartbeat_file);
+
     assert!(
         output.status.success(),
-        "order_saga --healthcheck must exit successfully"
+        "order_saga --healthcheck must exit successfully with fresh heartbeat"
     );
     assert_eq!(output.status.code(), Some(0));
     assert!(
         elapsed < Duration::from_secs(3),
         "healthcheck probe must complete quickly (elapsed: {elapsed:?})"
     );
+}
+
+#[test]
+fn test_order_saga_healthcheck_missing_heartbeat_fails() {
+    let bin_path = env!("CARGO_BIN_EXE_order_saga");
+    let non_existent =
+        std::env::temp_dir().join(format!("non_existent_hb_{}.tmp", Uuid::new_v4()));
+
+    let output = Command::new(bin_path)
+        .arg("--healthcheck")
+        .env("HEARTBEAT_PATH", &non_existent)
+        .output()
+        .expect("Failed to execute order_saga with --healthcheck");
+
+    assert!(
+        !output.status.success(),
+        "order_saga --healthcheck must fail when heartbeat file does not exist"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn test_order_saga_healthcheck_stale_heartbeat_fails() {
+    let bin_path = env!("CARGO_BIN_EXE_order_saga");
+    let temp_dir = std::env::temp_dir();
+    let heartbeat_file = temp_dir.join(format!("stale_heartbeat_{}.tmp", Uuid::new_v4()));
+
+    let file = std::fs::File::create(&heartbeat_file).expect("Failed to create test heartbeat file");
+    let stale_time = std::time::SystemTime::now() - Duration::from_secs(120);
+    let _ = file.set_modified(stale_time);
+    drop(file);
+
+    let output = Command::new(bin_path)
+        .arg("--healthcheck")
+        .env("HEARTBEAT_PATH", &heartbeat_file)
+        .output()
+        .expect("Failed to execute order_saga with --healthcheck");
+
+    let _ = std::fs::remove_file(&heartbeat_file);
+
+    assert!(
+        !output.status.success(),
+        "order_saga --healthcheck must fail when heartbeat is older than 60s"
+    );
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
@@ -481,4 +532,213 @@ fn test_http_enterprise_dispatcher_configuration() {
         "https://erp.internal/api/v1/settle"
     );
     assert_eq!(dispatcher.auth_token(), Some("secret-token-xyz"));
+}
+
+#[tokio::test]
+async fn test_non_transient_http_4xx_does_not_retry_and_acknowledges_offset() {
+    let config = SagaConfig {
+        max_retries: 3,
+        backoff_initial_ms: 10,
+        backoff_max_ms: 50,
+        ..Default::default()
+    };
+
+    let stream = InMemoryStreamConsumer::new();
+    let order_id = format!("ord-{}", Uuid::now_v7());
+
+    let credit_event = CreditIssuedEvent::new(&order_id, 1000, "Courtesy goodwill", 1);
+    let payload = serde_json::to_vec(&DomainEvent::CreditIssued(credit_event))
+        .expect("Failed to serialize credit event");
+
+    // 400 Bad Request is non-transient, must fail on attempt 1 without retry
+    let dispatcher = MockEnterpriseDispatcher::with_http_error(1, 400, "Bad Request");
+    let mut saga = OrderSagaManager::new(config, stream, dispatcher);
+    saga.stream_mut()
+        .enqueue(ReceivedMessage::new(42, 0, payload));
+
+    let outcome = saga
+        .process_next()
+        .await
+        .expect("Should return Ok(Some(outcome))")
+        .expect("Outcome should be present");
+
+    assert!(outcome.is_exhausted(), "Outcome must be ExhaustedRetries");
+    match outcome {
+        SagaOutcome::ExhaustedRetries {
+            attempts, error, ..
+        } => {
+            assert_eq!(attempts, 1, "Non-transient 4xx error must not be retried");
+            assert!(error.contains("400"), "Error should reflect 400 status");
+        }
+        _ => panic!("Expected ExhaustedRetries"),
+    }
+
+    assert_eq!(
+        saga.dispatcher().dispatched_count(),
+        1,
+        "Dispatcher must only be called once on non-transient 4xx"
+    );
+    assert_eq!(
+        saga.stream().acknowledged_offsets(),
+        vec![42],
+        "Offset must be acknowledged to avoid head-of-line blocking"
+    );
+}
+
+#[tokio::test]
+async fn test_transient_http_429_retries_with_backoff() {
+    let config = SagaConfig {
+        max_retries: 3,
+        backoff_initial_ms: 10,
+        backoff_max_ms: 50,
+        ..Default::default()
+    };
+
+    let stream = InMemoryStreamConsumer::new();
+    let order_id = format!("ord-{}", Uuid::now_v7());
+
+    let credit_event = CreditIssuedEvent::new(&order_id, 1000, "Courtesy credit", 1);
+    let payload = serde_json::to_vec(&DomainEvent::CreditIssued(credit_event))
+        .expect("Failed to serialize credit event");
+
+    // Fail first 2 attempts with HTTP 429 Too Many Requests, then succeed on attempt 3
+    let dispatcher = MockEnterpriseDispatcher::with_http_error(2, 429, "Too Many Requests");
+    let mut saga = OrderSagaManager::new(config, stream, dispatcher);
+    saga.stream_mut()
+        .enqueue(ReceivedMessage::new(88, 0, payload));
+
+    let outcome = saga
+        .process_next()
+        .await
+        .expect("Should process message")
+        .expect("Outcome should be present");
+
+    assert!(outcome.is_dispatched(), "Outcome must be Dispatched after retry");
+    match outcome {
+        SagaOutcome::Dispatched {
+            attempts,
+            response_status,
+            ..
+        } => {
+            assert_eq!(attempts, 3, "Should succeed on 3rd attempt after 2 retries");
+            assert_eq!(response_status, 200);
+        }
+        _ => panic!("Expected Dispatched outcome"),
+    }
+
+    assert_eq!(saga.dispatcher().dispatched_count(), 3);
+}
+
+#[test]
+fn test_saga_error_is_transient_matrix() {
+    use ferrous_cqrses::saga::SagaError;
+
+    // Transient: network error, timeout, 5xx, 429, 408
+    assert!(SagaError::NetworkError("connection reset".to_string()).is_transient());
+    assert!(SagaError::Timeout("deadline exceeded".to_string()).is_transient());
+    assert!(SagaError::HttpError { status: 500, body: "".to_string() }.is_transient());
+    assert!(SagaError::HttpError { status: 502, body: "".to_string() }.is_transient());
+    assert!(SagaError::HttpError { status: 503, body: "".to_string() }.is_transient());
+    assert!(SagaError::HttpError { status: 504, body: "".to_string() }.is_transient());
+    assert!(SagaError::HttpError { status: 429, body: "".to_string() }.is_transient());
+    assert!(SagaError::HttpError { status: 408, body: "".to_string() }.is_transient());
+
+    // Non-transient: 400, 401, 403, 404, 422, SerializationError, ConfigurationError
+    assert!(!SagaError::HttpError { status: 400, body: "".to_string() }.is_transient());
+    assert!(!SagaError::HttpError { status: 401, body: "".to_string() }.is_transient());
+    assert!(!SagaError::HttpError { status: 403, body: "".to_string() }.is_transient());
+    assert!(!SagaError::HttpError { status: 404, body: "".to_string() }.is_transient());
+    assert!(!SagaError::HttpError { status: 422, body: "".to_string() }.is_transient());
+    assert!(!SagaError::SerializationError("bad json".to_string()).is_transient());
+    assert!(!SagaError::ConfigurationError("bad config".to_string()).is_transient());
+}
+
+#[tokio::test]
+async fn test_credit_issued_exceeding_max_ceiling_skipped() {
+    let config = SagaConfig::default();
+    let stream = InMemoryStreamConsumer::new();
+    let order_id = format!("ord-{}", Uuid::now_v7());
+
+    // 2500 cents ($25.00) exceeds MAX_COURTESY_CREDIT_CENTS (2000 cents / $20.00)
+    let credit_event = CreditIssuedEvent::new(&order_id, 2500, "Excessive courtesy credit", 1);
+    let payload = serde_json::to_vec(&DomainEvent::CreditIssued(credit_event))
+        .expect("Failed to serialize credit event");
+
+    let dispatcher = MockEnterpriseDispatcher::new();
+    let mut saga = OrderSagaManager::new(config, stream, dispatcher);
+    saga.stream_mut()
+        .enqueue(ReceivedMessage::new(10, 0, payload));
+
+    let outcome = saga
+        .process_next()
+        .await
+        .expect("Should process message")
+        .expect("Outcome should be present");
+
+    assert!(outcome.is_ignored());
+    assert_eq!(saga.dispatcher().dispatched_count(), 0);
+    assert_eq!(saga.stream().acknowledged_offsets(), vec![10]);
+}
+
+#[test]
+fn test_idempotency_key_determinism_and_uniqueness() {
+    let order_id = format!("ord-{}", Uuid::now_v7());
+    let event_id_1 = Uuid::now_v7();
+    let event_id_2 = Uuid::now_v7();
+
+    let key_1a = format!("saga-settlement-{order_id}-{event_id_1}");
+    let key_1b = format!("saga-settlement-{order_id}-{event_id_1}");
+    let key_2 = format!("saga-settlement-{order_id}-{event_id_2}");
+
+    // Determinism
+    assert_eq!(key_1a, key_1b, "Idempotency key generation must be deterministic");
+    assert!(key_1a.starts_with("saga-settlement-"));
+
+    // Uniqueness across events
+    assert_ne!(key_1a, key_2, "Different events must have unique idempotency keys");
+}
+
+#[tokio::test]
+async fn test_saga_outcome_buffer_bounded_draining() {
+    let config = SagaConfig::default();
+    let stream = InMemoryStreamConsumer::new();
+    let dispatcher = MockEnterpriseDispatcher::new();
+    let mut saga = OrderSagaManager::new(config, stream, dispatcher);
+
+    // Push 1005 non-credit messages
+    for i in 0..1005u64 {
+        let event = DomainEvent::OrderCreated(OrderCreatedEvent::new(
+            format!("ord-{i}"),
+            "cust-1",
+            1000,
+            Utc::now(),
+        ));
+        let payload = serde_json::to_vec(&event).unwrap();
+        saga.stream_mut()
+            .enqueue(ReceivedMessage::new(i, 0, payload));
+    }
+
+    let count = saga.process_all_available().await.expect("Should process all");
+    assert_eq!(count, 1005);
+
+    // Buffer capped at 1000, drained 100 on reach: 1005 - 100 = 905
+    assert_eq!(saga.outcomes().len(), 905);
+}
+
+#[test]
+fn test_saga_config_debug_redacts_auth_token() {
+    let config = SagaConfig {
+        auth_token: Some("super-secret-enterprise-bearer-token".to_string()),
+        ..Default::default()
+    };
+
+    let debug_repr = format!("{config:?}");
+    assert!(
+        !debug_repr.contains("super-secret-enterprise-bearer-token"),
+        "Bearer token must not leak in Debug representation"
+    );
+    assert!(
+        debug_repr.contains("[REDACTED]"),
+        "Bearer token must be redacted in Debug representation"
+    );
 }

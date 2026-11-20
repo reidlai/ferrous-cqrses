@@ -1,6 +1,9 @@
 use clap::Parser;
 use ferrous_cqrses::consumer::{Config, IggyStreamConsumer};
 use ferrous_cqrses::saga::{HttpEnterpriseDispatcher, OrderSagaManager, SagaConfig};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 #[tokio::main]
@@ -9,24 +12,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if config.healthcheck {
         // High-fidelity healthcheck probe for container runtime:
-        // Verifies daemon heartbeat freshness on /tmp/daemon_heartbeat if present.
-        let heartbeat_path = std::path::Path::new("/tmp/daemon_heartbeat");
-        if heartbeat_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(heartbeat_path) {
-                if let Ok(modified) = metadata.modified() {
-                    if let Ok(elapsed) = modified.elapsed() {
-                        if elapsed > std::time::Duration::from_secs(60) {
-                            eprintln!(
-                                "Healthcheck failed: daemon heartbeat is stale ({:?} ago)",
-                                elapsed
-                            );
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
+        // Verifies daemon heartbeat freshness on heartbeat path (default: /tmp/daemon_heartbeat).
+        let heartbeat_path_str = std::env::var("HEARTBEAT_PATH")
+            .unwrap_or_else(|_| "/tmp/daemon_heartbeat".to_string());
+        let heartbeat_path = std::path::Path::new(&heartbeat_path_str);
+        if !heartbeat_path.exists() {
+            eprintln!(
+                "Healthcheck failed: heartbeat file does not exist ({})",
+                heartbeat_path.display()
+            );
+            std::process::exit(1);
         }
-        return Ok(());
+        let metadata = match std::fs::metadata(heartbeat_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Healthcheck failed: cannot read metadata: {e}");
+                std::process::exit(1);
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Healthcheck failed: cannot read modified timestamp: {e}");
+                std::process::exit(1);
+            }
+        };
+        match modified.elapsed() {
+            Ok(elapsed) if elapsed > Duration::from_secs(60) => {
+                eprintln!(
+                    "Healthcheck failed: daemon heartbeat is stale ({:?} ago)",
+                    elapsed
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Healthcheck failed: clock error: {e}");
+                std::process::exit(1);
+            }
+            _ => return Ok(()),
+        }
     }
 
     // Initialize tracing subscriber with JSON formatter and env-filter
@@ -102,14 +126,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let dispatcher = HttpEnterpriseDispatcher::from_config(&config)?;
-    let mut saga_manager = OrderSagaManager::new(config, stream, dispatcher);
+    let last_active = Arc::new(AtomicU64::new(
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+    ));
+    let mut saga_manager = OrderSagaManager::new(config, stream, dispatcher)
+        .with_heartbeat_tracker(last_active.clone());
 
-    // Spawn periodic heartbeat updater on /tmp/daemon_heartbeat for container healthcheck probe
-    tokio::spawn(async {
-        let heartbeat_path = std::path::Path::new("/tmp/daemon_heartbeat");
+    let heartbeat_path_str = std::env::var("HEARTBEAT_PATH")
+        .unwrap_or_else(|_| "/tmp/daemon_heartbeat".to_string());
+    let heartbeat_path = std::path::PathBuf::from(heartbeat_path_str);
+    let _ = std::fs::write(&heartbeat_path, b"healthy");
+
+    // Spawn periodic heartbeat updater coupled to active saga processing
+    let tracker = last_active.clone();
+    let heartbeat_target = heartbeat_path.clone();
+    tokio::spawn(async move {
         loop {
-            let _ = std::fs::write(heartbeat_path, b"healthy");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let last = tracker.load(Ordering::Relaxed);
+            // Only touch heartbeat file if saga loop has been active within 60 seconds
+            if now.saturating_sub(last) <= 60 {
+                let _ = std::fs::write(&heartbeat_target, b"healthy");
+            }
         }
     });
 

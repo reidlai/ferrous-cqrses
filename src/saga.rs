@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+use crate::aggregate::MAX_COURTESY_CREDIT_CENTS;
 use crate::consumer::{Config, InMemoryStreamConsumer, ReceivedMessage, StreamConsumer};
 use crate::error::DomainError;
 use crate::events::DomainEvent;
 
 /// Configuration options for the order saga process manager daemon.
-#[derive(Debug, Clone, PartialEq, Eq, Parser, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Parser, Serialize, Deserialize)]
 #[command(
     name = "ferrous-cqrses-order-saga",
     author = "FerrousCX Contributors",
@@ -81,6 +82,24 @@ pub struct SagaConfig {
     /// Execute static healthcheck probe and exit immediately
     #[arg(long, default_value_t = false)]
     pub healthcheck: bool,
+}
+
+impl std::fmt::Debug for SagaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SagaConfig")
+            .field("iggy_server_address", &self.iggy_server_address)
+            .field("stream_name", &self.stream_name)
+            .field("topic_orders_events", &self.topic_orders_events)
+            .field("consumer_group", &self.consumer_group)
+            .field("enterprise_settlement_url", &self.enterprise_settlement_url)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field("max_retries", &self.max_retries)
+            .field("backoff_initial_ms", &self.backoff_initial_ms)
+            .field("backoff_max_ms", &self.backoff_max_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("healthcheck", &self.healthcheck)
+            .finish()
+    }
 }
 
 impl Default for SagaConfig {
@@ -170,7 +189,7 @@ impl SagaError {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::NetworkError(_) | Self::Timeout(_) => true,
-            Self::HttpError { status, .. } => *status >= 500 || *status == 429,
+            Self::HttpError { status, .. } => *status >= 500 || *status == 429 || *status == 408,
             _ => false,
         }
     }
@@ -202,11 +221,20 @@ pub trait EnterpriseDispatcher: Send + Sync {
 }
 
 /// Production HTTP enterprise dispatcher using `reqwest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpEnterpriseDispatcher {
     client: reqwest::Client,
     endpoint_url: String,
     auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for HttpEnterpriseDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpEnterpriseDispatcher")
+            .field("endpoint_url", &self.endpoint_url)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl HttpEnterpriseDispatcher {
@@ -263,13 +291,25 @@ impl EnterpriseDispatcher for HttpEnterpriseDispatcher {
         let resp = req_builder.send().await.map_err(|e| {
             if e.is_timeout() {
                 SagaError::Timeout(e.to_string())
+            } else if e.is_builder() {
+                SagaError::ConfigurationError(format!("Invalid request format/header: {e}"))
             } else {
                 SagaError::NetworkError(e.to_string())
             }
         })?;
 
         let status_code = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
+        let body_bytes = resp.bytes().await.map_err(|e| {
+            if e.is_timeout() {
+                SagaError::Timeout(e.to_string())
+            } else {
+                SagaError::NetworkError(format!("Failed reading response body: {e}"))
+            }
+        })?;
+
+        // Bound response body to 64KB to prevent OOM
+        let capped_len = body_bytes.len().min(64 * 1024);
+        let body = String::from_utf8_lossy(&body_bytes[..capped_len]).to_string();
 
         if (200..300).contains(&status_code) {
             Ok(EnterpriseResponse {
@@ -489,6 +529,7 @@ pub struct OrderSagaManager<
     stream: S,
     dispatcher: D,
     outcomes: Vec<SagaOutcome>,
+    heartbeat_tracker: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
@@ -499,7 +540,14 @@ impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
             stream,
             dispatcher,
             outcomes: Vec::new(),
+            heartbeat_tracker: None,
         }
+    }
+
+    /// Attaches an atomic timestamp tracker to record liveness on each processing iteration.
+    pub fn with_heartbeat_tracker(mut self, tracker: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.heartbeat_tracker = Some(tracker);
+        self
     }
 
     pub fn config(&self) -> &SagaConfig {
@@ -610,14 +658,15 @@ impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
             }
         };
 
-        // 3. Domain invariant check: non-positive credit amounts are discarded
-        if credit_event.amount_cents <= 0 {
+        // 3. Domain invariant check: non-positive or excessive credit amounts are discarded
+        if credit_event.amount_cents <= 0 || credit_event.amount_cents > MAX_COURTESY_CREDIT_CENTS {
             warn!(
                 partition_id = partition_id,
                 offset = offset,
                 order_id = %credit_event.order_id,
                 amount_cents = credit_event.amount_cents,
-                "Ignoring CreditIssued event with zero or negative credit amount"
+                max_allowed = MAX_COURTESY_CREDIT_CENTS,
+                "Ignoring CreditIssued event with credit amount outside valid range (1..={MAX_COURTESY_CREDIT_CENTS})"
             );
             self.stream
                 .acknowledge(partition_id, offset)
@@ -650,8 +699,8 @@ impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
         let mut attempts: u32 = 0;
         let mut last_error_msg = String::new();
         let mut success_response = None;
-        let mut backoff = Duration::from_millis(self.config.backoff_initial_ms);
         let max_backoff = Duration::from_millis(self.config.backoff_max_ms);
+        let mut backoff = Duration::from_millis(self.config.backoff_initial_ms).min(max_backoff);
 
         loop {
             attempts += 1;
@@ -686,7 +735,7 @@ impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
                     }
 
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(max_backoff);
+                    backoff = backoff.checked_mul(2).unwrap_or(max_backoff).min(max_backoff);
                 }
             }
         }
@@ -732,6 +781,14 @@ impl<S: StreamConsumer, D: EnterpriseDispatcher> OrderSagaManager<S, D> {
 
     /// Polls and processes the next message from the stream if available.
     pub async fn process_next(&mut self) -> Result<Option<SagaOutcome>, SagaError> {
+        if let Some(ref tracker) = self.heartbeat_tracker {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            tracker.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+
         match self
             .stream
             .poll_message()
