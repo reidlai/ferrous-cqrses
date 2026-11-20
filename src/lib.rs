@@ -28,6 +28,7 @@ pub mod consumer;
 pub mod id;
 pub mod projection;
 pub mod publisher;
+pub mod saga;
 pub mod serialization;
 pub mod sierra;
 
@@ -48,6 +49,11 @@ pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use projection::ConsolidatedOrderProjection;
 pub use publisher::{
     IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
+};
+pub use saga::{
+    EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
+    HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
+    OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
 };
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 pub use sierra::{
@@ -74,6 +80,11 @@ pub mod prelude {
     pub use crate::projection::ConsolidatedOrderProjection;
     pub use crate::publisher::{
         IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
+    };
+    pub use crate::saga::{
+        EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
+        HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
+        OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
     };
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
     pub use crate::sierra::{
