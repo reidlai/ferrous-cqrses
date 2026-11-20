@@ -24,6 +24,7 @@ pub mod handler {
 }
 
 // Infrastructure and transport modules
+pub mod callback;
 pub mod consumer;
 pub mod delta;
 pub mod id;
@@ -34,6 +35,10 @@ pub mod serialization;
 pub mod sierra;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
+pub use callback::{
+    CallbackError, CallbackOutcome, CallbackPublisher, CallbackService, EventListener,
+    SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
+};
 pub use domain::order::{
     validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
     CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
@@ -73,6 +78,10 @@ pub mod prelude {
         OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent,
         OrderStatus, OrderStatusUpdatedEvent, SettleCourtesyCreditCommand,
         MAX_COURTESY_CREDIT_CENTS,
+    };
+    pub use crate::callback::{
+        CallbackError, CallbackOutcome, CallbackPublisher, CallbackService, EventListener,
+        SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
     };
     pub use crate::consumer::{
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,

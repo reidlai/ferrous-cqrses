@@ -21,9 +21,15 @@
    - Enforces all business invariants: strict **$20.00 / 2,000 cents courtesy credit cap (AD-17)**, lifecycle state transition guards, and monotonic `UUIDv7` idempotency deduplication.
    - Emits validated state snapshots as **`ConsolidatedOrderProjection`** records to the outbound topic (`orders/consolidated`).
    - Downstream stream processors (e.g. **Arroyo**) consume projections and commit materialized views to **Delta Lake** (`orders_current_state` and `orders_raw_events`) via 2PC Parquet commits.
+3. **Callback Service & Settlement Worker (`src/callback.rs`):**  
+   An asynchronous queue-based callback worker and domain service:
+   - Consumes enterprise settlement callback messages from Apache Iggy topic `orders/callbacks` (consumer group `cg-order-callback`).
+   - Validates domain invariants against `OrderAggregate` in SierraDB via `CommandHandler`.
+   - Atomically commits resulting domain events (`CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`) via `EAPPEND`.
+   - Publishes committed domain events to Apache Iggy (`orders/events`) with automatic rollback on publisher failures.
 
 ### B. Query Side (Read Path & Analytical Serving)
-3. **DataFusion Analytical Query Engine (`query-service`):**  
+4. **DataFusion Analytical Query Engine (`query-service`):**  
    Standalone vectorized query service and embedded Lakehouse query runtime powered by **Apache DataFusion** and `delta-rs`:
    - Executes sub-3ms analytical queries over materialized Delta Lake read models (`orders_current_state`, `orders_raw_events`, and historical `olist_*` tables).
    - Exposes **Arrow Flight SQL** (port `50051`) for high-throughput binary Arrow streaming and **HTTP REST** (port `8085`) for interactive SQL queries (`/api/v1/query`), catalog introspection, and health monitoring.
