@@ -10,6 +10,9 @@ pub mod domain;
 pub mod aggregate {
     pub use crate::domain::order::aggregate::*;
 }
+pub mod callback {
+    pub use crate::domain::order::callback::*;
+}
 pub mod commands {
     pub use crate::domain::order::commands::*;
 }
@@ -22,45 +25,43 @@ pub mod events {
 pub mod handler {
     pub use crate::domain::order::handler::*;
 }
+pub mod projection {
+    pub use crate::domain::order::projection::*;
+}
+pub mod saga {
+    pub use crate::domain::order::saga::*;
+}
 
 // Infrastructure and transport modules
-pub mod callback;
 pub mod consumer;
 pub mod delta;
 pub mod id;
-pub mod projection;
 pub mod publisher;
-pub mod saga;
 pub mod serialization;
 pub mod sierra;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
-pub use callback::{
-    CallbackError, CallbackOutcome, CallbackPublisher, CallbackService, EventListener,
-    SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
-};
-pub use domain::order::{
-    validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
-    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
-    CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
-    FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand, OrderAggregate,
-    OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderStatus,
-    OrderStatusUpdatedEvent, SettleCourtesyCreditCommand, MAX_COURTESY_CREDIT_CENTS,
-};
 pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
     ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
 };
 pub use delta::{write_delta_table_snapshot, DeltaLogMetadata};
+pub use domain::order::{
+    validate_courtesy_credit_amount, CallbackError, CallbackOutcome, CallbackPublisher,
+    CallbackService, CancelOrderCommand, CommandHandler, ConsolidatedOrderProjection,
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+    CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher,
+    EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
+    FailCourtesyCreditSettlementCommand, HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher,
+    InvariantError, IssueCourtesyCreditCommand, MockEnterpriseDispatcher, OrderAggregate,
+    OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager, OrderStatus,
+    OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome, SettleCourtesyCreditCommand,
+    SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
+    MAX_COURTESY_CREDIT_CENTS,
+};
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
-pub use projection::ConsolidatedOrderProjection;
 pub use publisher::{
     IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
-};
-pub use saga::{
-    EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
-    HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
-    OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
 };
 pub use serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
 pub use sierra::{
@@ -70,32 +71,27 @@ pub use sierra::{
 
 /// Convenience module for glob-importing all core domain contracts and infrastructure interfaces.
 pub mod prelude {
-    pub use crate::domain::order::{
-        validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
-        CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
-        CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
-        FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand,
-        OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent,
-        OrderStatus, OrderStatusUpdatedEvent, SettleCourtesyCreditCommand,
-        MAX_COURTESY_CREDIT_CENTS,
-    };
-    pub use crate::callback::{
-        CallbackError, CallbackOutcome, CallbackPublisher, CallbackService, EventListener,
-        SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
-    };
     pub use crate::consumer::{
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
         ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
     };
+    pub use crate::delta::{write_delta_table_snapshot, DeltaLogMetadata};
+    pub use crate::domain::order::{
+        validate_courtesy_credit_amount, CallbackError, CallbackOutcome, CallbackPublisher,
+        CallbackService, CancelOrderCommand, CommandHandler, ConsolidatedOrderProjection,
+        CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+        CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher,
+        EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
+        FailCourtesyCreditSettlementCommand, HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher,
+        InvariantError, IssueCourtesyCreditCommand, MockEnterpriseDispatcher, OrderAggregate,
+        OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager,
+        OrderStatus, OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome,
+        SettleCourtesyCreditCommand, SettlementCallbackMessage, SettlementStatus,
+        CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, MAX_COURTESY_CREDIT_CENTS,
+    };
     pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
-    pub use crate::projection::ConsolidatedOrderProjection;
     pub use crate::publisher::{
         IggyStreamPublisher, InMemoryStreamPublisher, PublishedMessage, StreamPublisher,
-    };
-    pub use crate::saga::{
-        EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
-        HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
-        OrderSagaManager, SagaConfig, SagaError, SagaOutcome,
     };
     pub use crate::serialization::{from_bincode, from_json, to_bincode, to_json, to_json_pretty};
     pub use crate::sierra::{
