@@ -473,11 +473,12 @@ pub struct SierraClient {
 impl SierraClient {
     /// Connects to a SierraDB instance at the given address.
     pub async fn connect(addr: &str) -> Result<Self, DomainError> {
-        let stream = tokio::net::TcpStream::connect(addr)
+        let clean_addr = addr.trim_start_matches("redis://").trim_start_matches("tcp://");
+        let stream = tokio::net::TcpStream::connect(clean_addr)
             .await
             .map_err(|e| DomainError::Sierra(format!("Failed to connect to SierraDB at {addr}: {e}")))?;
         Ok(Self {
-            addr: addr.to_string(),
+            addr: clean_addr.to_string(),
             stream,
             read_buf: bytes::BytesMut::with_capacity(8192),
         })

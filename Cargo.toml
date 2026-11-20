@@ -18,6 +18,10 @@ path = "src/bin/command_handler.rs"
 name = "order_handler"
 path = "src/bin/order_handler.rs"
 
+[[bin]]
+name = "order_projection"
+path = "src/bin/order_projection.rs"
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -40,7 +40,7 @@ pub use domain::order::{
 };
 pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
-    ReceivedMessage, StreamConsumer,
+    ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
 };
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use projection::ConsolidatedOrderProjection;
@@ -63,7 +63,7 @@ pub mod prelude {
     };
     pub use crate::consumer::{
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
-        ReceivedMessage, StreamConsumer,
+        ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
     };
     pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
     pub use crate::projection::ConsolidatedOrderProjection;

@@ -792,3 +792,20 @@ async fn test_command_consumer_with_sierradb_handler() {
     let events = client.scan(&stream_id, "-", "+").await.unwrap();
     assert_eq!(events.len(), 2);
 }
+
+#[tokio::test]
+async fn test_sierradb_connect_strips_url_prefixes() {
+    let (addr, _server) = spawn_mock_sierradb_server().await;
+    let redis_addr = format!("redis://{addr}");
+    let tcp_addr = format!("tcp://{addr}");
+
+    // Connect with redis:// prefix
+    let mut client_redis = SierraClient::connect(&redis_addr).await.expect("connect with redis://");
+    let ping_result = client_redis.ping().await;
+    assert!(ping_result.is_ok(), "PING over redis:// prefix should succeed");
+
+    // Connect with tcp:// prefix
+    let mut client_tcp = SierraClient::connect(&tcp_addr).await.expect("connect with tcp://");
+    let ping_result_tcp = client_tcp.ping().await;
+    assert!(ping_result_tcp.is_ok(), "PING over tcp:// prefix should succeed");
+}
