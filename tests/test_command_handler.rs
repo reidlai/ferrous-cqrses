@@ -796,3 +796,368 @@ async fn test_aggregate_rehydration_empty_events_rejected() {
     let err = handler.rehydrate("ORD-EMPTY", &[]).unwrap_err();
     assert_eq!(err, DomainError::OrderNotFound("ORD-EMPTY".to_string()));
 }
+
+#[tokio::test]
+async fn test_settle_courtesy_credit_success() {
+    let mut handler = CommandHandler::new();
+
+    // 1. Create order
+    let create_cmd = OrderCommand::CreateOrder(CreateOrderCommand::new(
+        "ORD-SETTLE-1",
+        "CUST-1",
+        1500,
+        Utc::now(),
+    ));
+    handler.handle_command(create_cmd).await.unwrap();
+
+    // 2. Issue courtesy credit ($15.00 / 1500 cents)
+    let credit_cmd = OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+        "ORD-SETTLE-1",
+        1500,
+        "Carrier delay concession",
+    ));
+    handler.handle_command(credit_cmd).await.unwrap();
+
+    let agg = handler.get_aggregate("ORD-SETTLE-1").unwrap();
+    assert_eq!(agg.courtesy_credit_cents, 1500);
+    assert_eq!(agg.settled_credit_cents, 0);
+    assert_eq!(agg.settlement_status, CreditSettlementStatus::PendingSettlement);
+
+    // 3. Settle courtesy credit
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-SETTLE-1",
+        1500,
+        "tx-settle-001",
+    ));
+    let event = handler.handle_command(settle_cmd).await.unwrap();
+    assert!(matches!(event, DomainEvent::CourtesyCreditSettled(_)));
+
+    let agg_settled = handler.get_aggregate("ORD-SETTLE-1").unwrap();
+    assert_eq!(agg_settled.courtesy_credit_cents, 1500);
+    assert_eq!(agg_settled.settled_credit_cents, 1500);
+    assert_eq!(agg_settled.settlement_status, CreditSettlementStatus::Settled);
+    assert_eq!(agg_settled.version, 3);
+}
+
+#[tokio::test]
+async fn test_fail_courtesy_credit_settlement_success() {
+    let mut handler = CommandHandler::new();
+
+    let create_cmd = OrderCommand::CreateOrder(CreateOrderCommand::new(
+        "ORD-SETTLE-FAIL",
+        "CUST-1",
+        1500,
+        Utc::now(),
+    ));
+    handler.handle_command(create_cmd).await.unwrap();
+
+    let credit_cmd = OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+        "ORD-SETTLE-FAIL",
+        1500,
+        "Concession",
+    ));
+    handler.handle_command(credit_cmd).await.unwrap();
+
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-SETTLE-FAIL",
+        1500,
+        "Insufficient account balance",
+    ));
+    let event = handler.handle_command(fail_cmd).await.unwrap();
+    assert!(matches!(event, DomainEvent::CourtesyCreditSettlementFailed(_)));
+
+    let agg = handler.get_aggregate("ORD-SETTLE-FAIL").unwrap();
+    assert_eq!(agg.settled_credit_cents, 0);
+    assert_eq!(agg.settlement_status, CreditSettlementStatus::SettlementFailed);
+    assert_eq!(agg.version, 3);
+}
+
+#[tokio::test]
+async fn test_settle_courtesy_credit_excessive_amount_rejected() {
+    let mut handler = CommandHandler::new();
+
+    let create_cmd = OrderCommand::CreateOrder(CreateOrderCommand::new(
+        "ORD-EXCESS-SETTLE",
+        "CUST-1",
+        1000,
+        Utc::now(),
+    ));
+    handler.handle_command(create_cmd).await.unwrap();
+
+    let credit_cmd = OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+        "ORD-EXCESS-SETTLE",
+        1000, // $10 credit
+        "Concession",
+    ));
+    handler.handle_command(credit_cmd).await.unwrap();
+
+    // Attempt to settle 2500 cents (exceeds $10 granted)
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-EXCESS-SETTLE",
+        2500,
+        "tx-999",
+    ));
+    let err = handler.handle_command(settle_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::InvalidAmount(2500));
+
+    let agg = handler.get_aggregate("ORD-EXCESS-SETTLE").unwrap();
+    assert_eq!(agg.settled_credit_cents, 0);
+    assert_eq!(agg.version, 2);
+}
+
+#[tokio::test]
+async fn test_settle_courtesy_credit_partial_and_multi_settlement() {
+    let mut handler = CommandHandler::new();
+
+    handler
+        .handle_command(OrderCommand::CreateOrder(CreateOrderCommand::new(
+            "ORD-MULTI-SETTLE",
+            "CUST-1",
+            2000,
+            Utc::now(),
+        )))
+        .await
+        .unwrap();
+
+    handler
+        .handle_command(OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+            "ORD-MULTI-SETTLE",
+            1500,
+            "Concession",
+        )))
+        .await
+        .unwrap();
+
+    // First partial settlement: 500
+    handler
+        .handle_command(OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+            "ORD-MULTI-SETTLE",
+            500,
+            "tx-p1",
+        )))
+        .await
+        .unwrap();
+
+    let agg1 = handler.get_aggregate("ORD-MULTI-SETTLE").unwrap();
+    assert_eq!(agg1.settled_credit_cents, 500);
+    assert_eq!(agg1.settlement_status, CreditSettlementStatus::PartiallySettled);
+
+    // Second partial settlement: 1000 (total = 1500)
+    handler
+        .handle_command(OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+            "ORD-MULTI-SETTLE",
+            1000,
+            "tx-p2",
+        )))
+        .await
+        .unwrap();
+
+    let agg2 = handler.get_aggregate("ORD-MULTI-SETTLE").unwrap();
+    assert_eq!(agg2.settled_credit_cents, 1500);
+    assert_eq!(agg2.settlement_status, CreditSettlementStatus::Settled);
+
+    // Third settlement attempt: 100 (exceeds 1500 granted credit)
+    let err = handler
+        .handle_command(OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+            "ORD-MULTI-SETTLE",
+            100,
+            "tx-p3",
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err, DomainError::InvalidAmount(100));
+}
+
+#[tokio::test]
+async fn test_settle_courtesy_credit_rejected_on_cancelled_or_fraud_locked() {
+    let mut handler = CommandHandler::new();
+
+    handler
+        .handle_command(OrderCommand::CreateOrder(CreateOrderCommand::new(
+            "ORD-CANCELLED-SETTLE",
+            "CUST-1",
+            1000,
+            Utc::now(),
+        )))
+        .await
+        .unwrap();
+
+    handler
+        .handle_command(OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+            "ORD-CANCELLED-SETTLE",
+            1000,
+            "Concession",
+        )))
+        .await
+        .unwrap();
+
+    handler
+        .handle_command(OrderCommand::CancelOrder(CancelOrderCommand::new(
+            "ORD-CANCELLED-SETTLE",
+            "Cancelled by user",
+        )))
+        .await
+        .unwrap();
+
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-CANCELLED-SETTLE",
+        500,
+        "tx-fail",
+    ));
+    let err = handler.handle_command(settle_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::OrderCancelled);
+
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-CANCELLED-SETTLE",
+        500,
+        "Failed clearing",
+    ));
+    let err = handler.handle_command(fail_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::OrderCancelled);
+}
+
+#[tokio::test]
+async fn test_settle_and_fail_courtesy_credit_rejected_on_fraud_locked() {
+    let mut handler = CommandHandler::new();
+
+    let mut agg = OrderAggregate::new("ORD-FRAUD-SETTLE", "CUST-F", 1000, Utc::now());
+    agg.status = OrderStatus::FraudLocked;
+    agg.courtesy_credit_cents = 1000;
+    agg.version = 2;
+    handler.insert_aggregate(agg);
+
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-FRAUD-SETTLE",
+        500,
+        "tx-fraud",
+    ));
+    let err = handler.handle_command(settle_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::OrderFraudLocked);
+
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-FRAUD-SETTLE",
+        500,
+        "Failed settlement",
+    ));
+    let err = handler.handle_command(fail_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::OrderFraudLocked);
+}
+
+#[tokio::test]
+async fn test_fail_courtesy_credit_settlement_rejected_on_zero_credit_or_fully_settled() {
+    let mut handler = CommandHandler::new();
+
+    // Order with $0 credit
+    handler
+        .handle_command(OrderCommand::CreateOrder(CreateOrderCommand::new(
+            "ORD-ZERO-CREDIT-FAIL",
+            "CUST-Z",
+            1000,
+            Utc::now(),
+        )))
+        .await
+        .unwrap();
+
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-ZERO-CREDIT-FAIL",
+        500,
+        "Fail attempt",
+    ));
+    let err = handler.handle_command(fail_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::InvalidAmount(500));
+
+    // Order with 1000 credit, settled 1000
+    handler
+        .handle_command(OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+            "ORD-ZERO-CREDIT-FAIL",
+            1000,
+            "Concession",
+        )))
+        .await
+        .unwrap();
+
+    handler
+        .handle_command(OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+            "ORD-ZERO-CREDIT-FAIL",
+            1000,
+            "tx-full",
+        )))
+        .await
+        .unwrap();
+
+    // Attempting to fail on already fully settled order
+    let fail_cmd2 = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-ZERO-CREDIT-FAIL",
+        500,
+        "Fail attempt post-settle",
+    ));
+    let err = handler.handle_command(fail_cmd2).await.unwrap_err();
+    assert_eq!(err, DomainError::InvalidAmount(500));
+}
+
+#[tokio::test]
+async fn test_settle_courtesy_credit_duplicate_command_id_rejected() {
+    let mut handler = CommandHandler::new();
+
+    handler
+        .handle_command(OrderCommand::CreateOrder(CreateOrderCommand::new(
+            "ORD-DUP-SETTLE",
+            "CUST-D",
+            1000,
+            Utc::now(),
+        )))
+        .await
+        .unwrap();
+
+    handler
+        .handle_command(OrderCommand::IssueCourtesyCredit(IssueCourtesyCreditCommand::new(
+            "ORD-DUP-SETTLE",
+            1000,
+            "Concession",
+        )))
+        .await
+        .unwrap();
+
+    let settle_cmd = SettleCourtesyCreditCommand::new("ORD-DUP-SETTLE", 500, "tx-dup-1");
+    let cmd_id = settle_cmd.command_id;
+    let order_cmd = OrderCommand::SettleCourtesyCredit(settle_cmd);
+
+    handler.handle_command(order_cmd.clone()).await.unwrap();
+
+    // Dispatching identical command with same command_id
+    let err = handler.handle_command(order_cmd).await.unwrap_err();
+    assert_eq!(err, DomainError::DuplicateCommand(cmd_id));
+}
+
+#[tokio::test]
+async fn test_aggregate_rehydration_with_settlement_events() {
+    let mut handler = CommandHandler::new();
+
+    let events = vec![
+        DomainEvent::OrderCreated(OrderCreatedEvent::new(
+            "ORD-REHYDRATE",
+            "CUST-R",
+            1000,
+            Utc::now(),
+        )),
+        DomainEvent::CreditIssued(CreditIssuedEvent::new(
+            "ORD-REHYDRATE",
+            1500,
+            "Concession",
+            2,
+        )),
+        DomainEvent::CourtesyCreditSettled(CourtesyCreditSettledEvent::new(
+            "ORD-REHYDRATE",
+            1500,
+            "tx-rehydrate",
+            3,
+        )),
+    ];
+
+    let rehydrated = handler.rehydrate("ORD-REHYDRATE", &events).unwrap();
+    assert_eq!(rehydrated.order_id, "ORD-REHYDRATE");
+    assert_eq!(rehydrated.courtesy_credit_cents, 1500);
+    assert_eq!(rehydrated.settled_credit_cents, 1500);
+    assert_eq!(rehydrated.settlement_status, CreditSettlementStatus::Settled);
+    assert_eq!(rehydrated.version, 3);
+}

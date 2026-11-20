@@ -33,10 +33,12 @@ pub mod sierra;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
 pub use domain::order::{
-    validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler, CreateOrderCommand,
-    CreditIssuedEvent, DomainError, DomainEvent, InvariantError, IssueCourtesyCreditCommand,
-    OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderStatus,
-    OrderStatusUpdatedEvent, MAX_COURTESY_CREDIT_CENTS,
+    validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+    CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
+    FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand, OrderAggregate,
+    OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderStatus,
+    OrderStatusUpdatedEvent, SettleCourtesyCreditCommand, MAX_COURTESY_CREDIT_CENTS,
 };
 pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
@@ -56,10 +58,13 @@ pub use sierra::{
 /// Convenience module for glob-importing all core domain contracts and infrastructure interfaces.
 pub mod prelude {
     pub use crate::domain::order::{
-        validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler, CreateOrderCommand,
-        CreditIssuedEvent, DomainError, DomainEvent, InvariantError, IssueCourtesyCreditCommand,
+        validate_courtesy_credit_amount, CancelOrderCommand, CommandHandler,
+        CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
+        CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
+        FailCourtesyCreditSettlementCommand, InvariantError, IssueCourtesyCreditCommand,
         OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent,
-        OrderStatus, OrderStatusUpdatedEvent, MAX_COURTESY_CREDIT_CENTS,
+        OrderStatus, OrderStatusUpdatedEvent, SettleCourtesyCreditCommand,
+        MAX_COURTESY_CREDIT_CENTS,
     };
     pub use crate::consumer::{
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,

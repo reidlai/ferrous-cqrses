@@ -119,6 +119,64 @@ impl OrderCancelledEvent {
     }
 }
 
+/// Event emitted when an issued courtesy credit concession is successfully settled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CourtesyCreditSettledEvent {
+    pub event_id: Uuid,
+    pub order_id: String,
+    pub amount_cents: i64,
+    pub transaction_ref: String,
+    pub settled_at: DateTime<Utc>,
+    pub version: u64,
+}
+
+impl CourtesyCreditSettledEvent {
+    pub fn new(
+        order_id: impl Into<String>,
+        amount_cents: i64,
+        transaction_ref: impl Into<String>,
+        version: u64,
+    ) -> Self {
+        Self {
+            event_id: generate_uuidv7(),
+            order_id: order_id.into(),
+            amount_cents,
+            transaction_ref: transaction_ref.into(),
+            settled_at: Utc::now(),
+            version,
+        }
+    }
+}
+
+/// Event emitted when an issued courtesy credit concession fails settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CourtesyCreditSettlementFailedEvent {
+    pub event_id: Uuid,
+    pub order_id: String,
+    pub amount_cents: i64,
+    pub reason: String,
+    pub failed_at: DateTime<Utc>,
+    pub version: u64,
+}
+
+impl CourtesyCreditSettlementFailedEvent {
+    pub fn new(
+        order_id: impl Into<String>,
+        amount_cents: i64,
+        reason: impl Into<String>,
+        version: u64,
+    ) -> Self {
+        Self {
+            event_id: generate_uuidv7(),
+            order_id: order_id.into(),
+            amount_cents,
+            reason: reason.into(),
+            failed_at: Utc::now(),
+            version,
+        }
+    }
+}
+
 /// Sum type of all domain events originating from or mutating order aggregates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,6 +185,8 @@ pub enum DomainEvent {
     CreditIssued(CreditIssuedEvent),
     OrderStatusUpdated(OrderStatusUpdatedEvent),
     OrderCancelled(OrderCancelledEvent),
+    CourtesyCreditSettled(CourtesyCreditSettledEvent),
+    CourtesyCreditSettlementFailed(CourtesyCreditSettlementFailedEvent),
 }
 
 /// Type alias aligning DomainEvent with order-centric event sourcing naming.
@@ -139,6 +199,8 @@ impl DomainEvent {
             Self::CreditIssued(e) => e.event_id,
             Self::OrderStatusUpdated(e) => e.event_id,
             Self::OrderCancelled(e) => e.event_id,
+            Self::CourtesyCreditSettled(e) => e.event_id,
+            Self::CourtesyCreditSettlementFailed(e) => e.event_id,
         }
     }
 
@@ -148,6 +210,8 @@ impl DomainEvent {
             Self::CreditIssued(e) => &e.order_id,
             Self::OrderStatusUpdated(e) => &e.order_id,
             Self::OrderCancelled(e) => &e.order_id,
+            Self::CourtesyCreditSettled(e) => &e.order_id,
+            Self::CourtesyCreditSettlementFailed(e) => &e.order_id,
         }
     }
 
@@ -157,6 +221,8 @@ impl DomainEvent {
             Self::CreditIssued(e) => e.version,
             Self::OrderStatusUpdated(e) => e.version,
             Self::OrderCancelled(e) => e.version,
+            Self::CourtesyCreditSettled(e) => e.version,
+            Self::CourtesyCreditSettlementFailed(e) => e.version,
         }
     }
 
@@ -166,6 +232,8 @@ impl DomainEvent {
             Self::CreditIssued(e) => e.issued_at,
             Self::OrderStatusUpdated(e) => e.updated_at,
             Self::OrderCancelled(e) => e.cancelled_at,
+            Self::CourtesyCreditSettled(e) => e.settled_at,
+            Self::CourtesyCreditSettlementFailed(e) => e.failed_at,
         }
     }
 }

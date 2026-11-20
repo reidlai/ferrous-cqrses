@@ -10,14 +10,16 @@ pub mod events;
 pub mod handler;
 
 pub use aggregate::{
-    validate_courtesy_credit_amount, OrderAggregate, OrderStatus, MAX_COURTESY_CREDIT_CENTS,
+    validate_courtesy_credit_amount, CreditSettlementStatus, OrderAggregate, OrderStatus,
+    MAX_COURTESY_CREDIT_CENTS,
 };
 pub use commands::{
-    CancelOrderCommand, CreateOrderCommand, IssueCourtesyCreditCommand, OrderCommand,
+    CancelOrderCommand, CreateOrderCommand, FailCourtesyCreditSettlementCommand,
+    IssueCourtesyCreditCommand, OrderCommand, SettleCourtesyCreditCommand,
 };
 pub use error::{DomainError, InvariantError};
 pub use events::{
-    CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent, OrderEvent,
-    OrderStatusUpdatedEvent,
+    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreditIssuedEvent, DomainEvent,
+    OrderCancelledEvent, OrderCreatedEvent, OrderEvent, OrderStatusUpdatedEvent,
 };
 pub use handler::CommandHandler;

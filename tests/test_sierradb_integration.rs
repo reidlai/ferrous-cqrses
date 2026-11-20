@@ -179,6 +179,28 @@ fn test_event_serialization_and_deserialization_roundtrip() {
     assert_eq!(name, "OrderCancelled");
     let deserialized = deserialize_event(name, &payload).unwrap();
     assert_eq!(cancel, deserialized);
+
+    let settled = DomainEvent::CourtesyCreditSettled(CourtesyCreditSettledEvent::new(
+        "ORD-501",
+        1200,
+        "tx-sierra-01",
+        4,
+    ));
+    let (name, payload) = serialize_event(&settled).unwrap();
+    assert_eq!(name, "CourtesyCreditSettled");
+    let deserialized = deserialize_event(name, &payload).unwrap();
+    assert_eq!(settled, deserialized);
+
+    let failed = DomainEvent::CourtesyCreditSettlementFailed(CourtesyCreditSettlementFailedEvent::new(
+        "ORD-501",
+        1200,
+        "Clearing failure",
+        5,
+    ));
+    let (name, payload) = serialize_event(&failed).unwrap();
+    assert_eq!(name, "CourtesyCreditSettlementFailed");
+    let deserialized = deserialize_event(name, &payload).unwrap();
+    assert_eq!(failed, deserialized);
 }
 
 // ============================================================================

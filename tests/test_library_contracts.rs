@@ -53,6 +53,26 @@ fn test_json_serialization_roundtrip_commands() {
     let create_json = to_json(&create_cmd).expect("CreateOrderCommand must serialize to JSON");
     let create_deser: OrderCommand = from_json(&create_json).expect("Create JSON must deserialize");
     assert_eq!(create_cmd, create_deser);
+
+    // Settle courtesy credit command roundtrip
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-9021",
+        1500,
+        "tx-settle-123",
+    ));
+    let settle_json = to_json(&settle_cmd).expect("SettleCourtesyCreditCommand must serialize to JSON");
+    let settle_deser: OrderCommand = from_json(&settle_json).expect("Settle JSON must deserialize");
+    assert_eq!(settle_cmd, settle_deser);
+
+    // Fail courtesy credit settlement command roundtrip
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-9021",
+        1500,
+        "Carrier rejected",
+    ));
+    let fail_json = to_json(&fail_cmd).expect("FailCourtesyCreditSettlementCommand must serialize to JSON");
+    let fail_deser: OrderCommand = from_json(&fail_json).expect("Fail JSON must deserialize");
+    assert_eq!(fail_cmd, fail_deser);
 }
 
 #[test]
@@ -87,6 +107,26 @@ fn test_bincode_serialization_roundtrip_commands() {
     let deser_create: OrderCommand =
         from_bincode(&bin_create).expect("Bincode create must deserialize");
     assert_eq!(create_cmd, deser_create);
+
+    let settle_cmd = OrderCommand::SettleCourtesyCredit(SettleCourtesyCreditCommand::new(
+        "ORD-9021",
+        1500,
+        "tx-settle-bin",
+    ));
+    let bin_settle = to_bincode(&settle_cmd).expect("SettleCourtesyCreditCommand must serialize to Bincode");
+    let deser_settle: OrderCommand =
+        from_bincode(&bin_settle).expect("Bincode settle must deserialize");
+    assert_eq!(settle_cmd, deser_settle);
+
+    let fail_cmd = OrderCommand::FailCourtesyCreditSettlement(FailCourtesyCreditSettlementCommand::new(
+        "ORD-9021",
+        1500,
+        "Carrier rejection",
+    ));
+    let bin_fail = to_bincode(&fail_cmd).expect("FailCourtesyCreditSettlementCommand must serialize to Bincode");
+    let deser_fail: OrderCommand =
+        from_bincode(&bin_fail).expect("Bincode fail must deserialize");
+    assert_eq!(fail_cmd, deser_fail);
 }
 
 #[test]
@@ -128,6 +168,26 @@ fn test_json_serialization_roundtrip_events() {
     let json_cancel = to_json(&cancel).expect("OrderCancelledEvent must serialize to JSON");
     let deser_cancel: DomainEvent = from_json(&json_cancel).expect("JSON cancel must deserialize");
     assert_eq!(cancel, deser_cancel);
+
+    let settled = DomainEvent::CourtesyCreditSettled(CourtesyCreditSettledEvent::new(
+        "ORD-7744",
+        1500,
+        "tx-settle-001",
+        5,
+    ));
+    let json_settled = to_json(&settled).expect("CourtesyCreditSettledEvent must serialize to JSON");
+    let deser_settled: DomainEvent = from_json(&json_settled).expect("JSON settled must deserialize");
+    assert_eq!(settled, deser_settled);
+
+    let failed = DomainEvent::CourtesyCreditSettlementFailed(CourtesyCreditSettlementFailedEvent::new(
+        "ORD-7744",
+        1500,
+        "Insufficient balance",
+        6,
+    ));
+    let json_failed = to_json(&failed).expect("CourtesyCreditSettlementFailedEvent must serialize to JSON");
+    let deser_failed: DomainEvent = from_json(&json_failed).expect("JSON failed must deserialize");
+    assert_eq!(failed, deser_failed);
 }
 
 #[test]
@@ -167,6 +227,30 @@ fn test_bincode_serialization_roundtrip_events() {
     let cancel_deser: DomainEvent =
         from_bincode(&cancel_bin).expect("Cancel event must deserialize");
     assert_eq!(cancel_event, cancel_deser);
+
+    // CourtesyCreditSettledEvent roundtrip
+    let settle_event = DomainEvent::CourtesyCreditSettled(CourtesyCreditSettledEvent::new(
+        "ORD-7744",
+        1500,
+        "tx-settle-bin",
+        4,
+    ));
+    let settle_bin = to_bincode(&settle_event).expect("Settle event must serialize to Bincode");
+    let settle_deser: DomainEvent =
+        from_bincode(&settle_bin).expect("Settle event must deserialize");
+    assert_eq!(settle_event, settle_deser);
+
+    // CourtesyCreditSettlementFailedEvent roundtrip
+    let fail_event = DomainEvent::CourtesyCreditSettlementFailed(CourtesyCreditSettlementFailedEvent::new(
+        "ORD-7744",
+        1500,
+        "Carrier rejection",
+        5,
+    ));
+    let fail_bin = to_bincode(&fail_event).expect("Fail event must serialize to Bincode");
+    let fail_deser: DomainEvent =
+        from_bincode(&fail_bin).expect("Fail event must deserialize");
+    assert_eq!(fail_event, fail_deser);
 }
 
 #[test]
