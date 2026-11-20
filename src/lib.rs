@@ -25,6 +25,7 @@ pub mod handler {
 
 // Infrastructure and transport modules
 pub mod consumer;
+pub mod delta;
 pub mod id;
 pub mod projection;
 pub mod publisher;
@@ -45,6 +46,7 @@ pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
     ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
 };
+pub use delta::{write_delta_table_snapshot, DeltaLogMetadata};
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use projection::ConsolidatedOrderProjection;
 pub use publisher::{
