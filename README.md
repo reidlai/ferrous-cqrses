@@ -67,7 +67,7 @@ flowchart TD
         CommandHandler -->|"5. Invariant Evaluation"| Aggregate
         CommandHandler -->|"6. EAPPEND Save to Stream"| SierraDB
         CommandHandler -->|"7. Publish to Iggy Topic"| IggyEvents
-        CallbackWorker -->|"15. Settle / Fail Command"| CommandHandler        
+        CallbackWorker -->|"14. Settle / Fail Command"| CommandHandler        
     end
 
     subgraph Streaming_Fabric ["Message Broker & Event Bus (Apache Iggy)"]
@@ -75,9 +75,8 @@ flowchart TD
         IggyCallbacks["Topic: orders/callbacks<br/>• Inbound External Responses<br/>(CreditSettlementResponse)"]
     end
 
-    subgraph Projection_Tier ["Projections & Saga Daemon (ferrous-cqrses)"]
-        OrderProjection["Read Projection (src/bin/order_projection.rs)<br/>• Consumer Group: cg-order-projection<br/>• Pure Event Folding (Zero Side-Effects)"]
-        DomainProjection["Domain Projection (src/bin/order_saga.rs)<br/>• Consumer Group: cg-order-saga<br/>• Private Network Orchestrator"]
+    subgraph Projection_Tier ["Projection & Process Manager Engine (ferrous-cqrses)"]
+        Projections["Projections (src/bin/order_projection.rs & order_saga.rs)<br/>• Consumer Groups: cg-order-projection / cg-order-saga<br/>• Delta Lake Materialization & Enterprise Dispatch"]
     end
 
     subgraph Lakehouse_Tier ["Analytical Lakehouse Storage"]
@@ -96,20 +95,19 @@ flowchart TD
 
     %% Step 1: User Command Ingestion
     Client -->|"1. Submit Request"| Command
-    CommandHandler -.->|"16. Live SSE Update"| Client
+    CommandHandler -.->|"15. Live SSE Update"| Client
 
     %% Step 2: Projections & Delta Lake Write
-    IggyEvents -->|"8. Consume orders/events"| OrderProjection
-    OrderProjection -->|"9. Commit Snapshots via delta-rs"| DeltaLake
+    IggyEvents -->|"8. Consume orders/events"| Projections
+    Projections -->|"9. Commit Snapshots via delta-rs"| DeltaLake
 
-    %% Step 3: Domain Projection Consumption & Enterprise Call
-    IggyEvents -->|"10. Consume CreditIssuedEvent"| DomainProjection
-    DomainProjection -->|"11. Outbound Enterprise Dispatch"| EnterpriseWorkflow
-    EnterpriseWorkflow -->|"12. Private Network Response"| DomainProjection
+    %% Step 3: Enterprise Dispatch & Response
+    Projections -->|"10. Outbound Enterprise Dispatch"| EnterpriseWorkflow
+    EnterpriseWorkflow -->|"11. Private Network Response"| Projections
 
     %% Step 4: Callback Queue Placement & Handling
-    DomainProjection -->|"13. Place Response Payload"| IggyCallbacks
-    IggyCallbacks -->|"14. Consume Callback Message"| CallbackWorker
+    Projections -->|"12. Place Response Payload"| IggyCallbacks
+    IggyCallbacks -->|"13. Consume Callback Message"| CallbackWorker
 ```
 
 #### How Command, Command Handler, Aggregate, and Projection Work Together:
@@ -121,8 +119,7 @@ flowchart TD
 | **Aggregate** | `OrderAggregate`<br/>(`src/domain/order/aggregate.rs`) | **Guardian of Invariants:** Domain entity maintaining internal state purely from past events. Evaluates business rules: e.g. **maximum $20 cumulative courtesy credit**, order lifecycle state compatibility (`Delivered`/`InTransit`), and emits uncommitted **Domain Events** (`CourtesyCreditIssued`, `OrderCancelled`, `CourtesyCreditSettled`). |
 | **Event Store** | `SierraDB` (Port 9090)<br/>(`src/sierra.rs`) | **Single Source of Truth:** Pure-Rust RESP3 append-only log. Ensures linear, atomic event ordering without table locks. |
 | **Domain Events** | `CourtesyCreditIssued`<br/>`OrderCancelled`<br/>`CourtesyCreditSettled`<br/>`CourtesyCreditSettlementFailed` | **Facts:** Immutable historical records published to Apache Iggy (`orders/events`) once durably committed to SierraDB. |
-| **Read Projection** | `order-projection`<br/>(`src/bin/order_projection.rs`) | **Read Model Materializer:** Consumes `orders/events` under consumer group `cg-order-projection`, purely folds events into state snapshots, and persists `orders_current_state` directly to **Delta Lake via `delta-rs`**. |
-| **Domain Projection (Saga)** | `order-saga`<br/>(`src/bin/order_saga.rs`) | **Process Manager (Saga):** Listens to `orders/events`, coordinates long-running side-effects with private internal enterprise backends (ERP, SAP), and deposits completed responses onto `orders/callbacks`. |
+| **Projections** | `order-projection` (`src/bin/order_projection.rs`)<br/>`order-saga` (`src/bin/order_saga.rs`) | **State Materialization & Process Management:** Consumes `orders/events` under consumer groups `cg-order-projection` and `cg-order-saga`. Folds events into `orders_current_state` snapshots directly on **Delta Lake via `delta-rs`** (read projection) while coordinating long-running enterprise side-effects and queueing response payloads onto `orders/callbacks` (domain saga / process manager). |
 | **Callback Loop** | `Callback Command Worker`<br/>(`src/callback.rs`) | **Closing the Loop:** Consumes enterprise responses from `orders/callbacks`, transforms them into a **`SettleCourtesyCreditCommand`** or **`FailCourtesyCreditSettlementCommand`**, and routes them back through the **Command Handler** to validate against the **Aggregate** and atomically commit terminal events to **SierraDB**. |
 
 ---
