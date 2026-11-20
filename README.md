@@ -36,61 +36,122 @@
 
 ---
 
-## 🏛️ Architecture Overview
+## 🏛️ System Architecture Topology
+
+`ferrous-cqrses` implements strict **Domain-Driven Design (DDD)** and **Command Query Responsibility Segregation (CQRS)** with **Event Sourcing (ES)**. 
+
+To clearly establish operational boundaries and demonstrate how domain components collaborate, the architecture separates the **Write Model (Commands, Handlers, Aggregates, Event Store, Projections, Saga Orchestration & Callbacks)** from the **Read Model (Projections, Lakehouse & Query Engines)**:
+
+---
+
+### 1. CQRS / ES Component Collaboration (Write & Saga Execution Path)
+
+The Write Path demonstrates how **Command**, **Command Handler**, **Aggregate**, **Event Store (SierraDB)**, **Projections (Iggy & delta-rs)**, **Saga Manager (`order-saga`)**, and **Callback Worker (`callback.rs`)** collaborate to enforce business invariants, update read-model persistence, and coordinate asynchronous enterprise integrations:
 
 ```mermaid
 flowchart TD
-    subgraph Client_Boundary ["Client Layer"]
-        UserAgent["Customer Support / Automated Agent"]
+    subgraph Client_Tier ["Client & Ingress (Public Perimeter)"]
+        Client["Frontend Client / API Gateway<br/>• Dispatches Domain Commands<br/>• Subscribes to Real-Time SSE"]
     end
 
-    subgraph API_Tier ["ferrous-api (Axum API Gateway)"]
-        APIHandler["Axum Command Handler<br/>(Imports ferrous-cqrses crate)"]
-        UserAgent -->|1. Submit Request| APIHandler
+    subgraph API_Tier ["Command Execution Engine (ferrous-cqrses & ferrous-api)"]
+        Command["Domain Commands<br/>• IssueCourtesyCreditCommand<br/>• CancelOrderCommand<br/>• SettleCourtesyCreditCommand"]
+        CommandHandler["OrderCommandHandler<br/>• 3. ESCAN from SierraDB<br/>• 4. Rehydrate Aggregate<br/>• 5. Invariant Evaluation<br/>• 6. EAPPEND to SierraDB<br/>• 7. Publish to Iggy Topic"]
+        Aggregate["OrderAggregate (Domain Model)<br/>• State: Status, Cumulative Credit<br/>• Invariant: Max $20 credit ceiling<br/>• Produces: CourtesyCreditIssued, Settled, Cancelled"]
+        CallbackWorker["Callback Command Worker (src/callback.rs)<br/>• Consumer Group: cg-order-callback<br/>• Generates Settle / Fail Commands"]
+        SierraDB[("SierraDB Event Store (Port 9090)<br/>• Pure-Rust RESP3 Protocol<br/>• ESCAN (Rehydrate) & EAPPEND (Atomic Append)")]
+
+        Command -->|"2. Dispatch to Handler"| CommandHandler
+        SierraDB -->|"3. ESCAN from SierraDB"| Aggregate
+        Aggregate -->|"4. State to Handler"| CommandHandler
+        CommandHandler -->|"5. Invariant Evaluation"| Aggregate
+        CommandHandler -->|"6. EAPPEND Save to Stream"| SierraDB
+        CommandHandler -->|"7. Publish to Iggy Topic"| IggyEvents
+        CallbackWorker -->|"15. Settle / Fail Command"| CommandHandler        
     end
 
-    subgraph Library_Crate ["ferrous-cqrses (Shared Library Crate: src/lib.rs)"]
-        CmdTypes["Typed Command Events<br/>• CreateOrderCommand<br/>• IssueCourtesyCreditCommand<br/>• CancelOrderCommand"]
-        DomainEvents["Typed Domain Events<br/>• OrderCreatedEvent<br/>• CreditIssuedEvent<br/>• OrderCancelledEvent"]
-        DomainInvariants["Domain Invariants<br/>• AD-17: 2,000¢ Courtesy Credit Cap<br/>• Valid Lifecycle Transitions"]
+    subgraph Streaming_Fabric ["Message Broker & Event Bus (Apache Iggy)"]
+        IggyEvents["Topic: orders/events<br/>• Committed Domain Events<br/>(CourtesyCreditIssued, Settled, Cancelled)"]
+        IggyCallbacks["Topic: orders/callbacks<br/>• Inbound External Responses<br/>(CreditSettlementResponse)"]
     end
 
-    APIHandler -->|Constructs typed command| CmdTypes
-
-    subgraph Streaming_Storage ["ferrous-streaming (Apache Iggy Event Bus)"]
-        IggyIntake[("Apache Iggy Broker<br/>Stream: orders<br/>Topic: intake<br/>(Key: order_id)")]
-        IggyConsolidated[("Apache Iggy Broker<br/>Stream: orders<br/>Topic: consolidated<br/>(Key: order_id)")]
+    subgraph Projection_Tier ["Projections & Saga Daemon (ferrous-cqrses)"]
+        OrderProjection["Read Projection (src/bin/order_projection.rs)<br/>• Consumer Group: cg-order-projection<br/>• Pure Event Folding (Zero Side-Effects)"]
+        DomainProjection["Domain Projection (src/bin/order_saga.rs)<br/>• Consumer Group: cg-order-saga<br/>• Private Network Orchestrator"]
     end
 
-    APIHandler -->|2. Publish Command Event| IggyIntake
-
-    subgraph Daemon_Service ["ferrous-cqrses Container (src/bin/command_handler.rs)"]
-        StreamConsumer["IggyStreamConsumer<br/>Consumer Group: cg-cmd-handler<br/>Sequential Partitioning"]
-        AggHandler["CommandHandler<br/>• Rehydrates OrderAggregate<br/>• Enforces Invariants<br/>• Folds Domain Events"]
-        OrderAgg[("OrderAggregate<br/>• state: OrderStatus<br/>• courtesy_credit_cents<br/>• version: u64")]
-        ProjectionEmitter["StreamPublisher<br/>Emits ConsolidatedOrderProjection"]
-        
-        StreamConsumer -->|3. Consume Sequential Command| AggHandler
-        AggHandler <-->|Folds / Rehydrates| OrderAgg
-        AggHandler -->|4. On Success: Apply Event| ProjectionEmitter
+    subgraph Lakehouse_Tier ["Analytical Lakehouse Storage"]
+        DeltaLake[("Delta Lake Storage (/data/delta)<br/>• orders_current_state (Snapshots)<br/>• orders_raw_events (Audit Log)")]
     end
 
-    IggyIntake -->|Read partitioned stream| StreamConsumer
-    ProjectionEmitter -->|5. Publish Projection Event| IggyConsolidated
+    subgraph Enterprise_Tier ["External Enterprise Network (Private / Partner)"]
+        EnterpriseWorkflow["Enterprise Workflow / ERP System<br/>(SAP / Core Banking / Clearing Partner)"]
+    end        
 
-    subgraph Downstream_Sinks ["Downstream Lakehouse Storage"]
-        Arroyo["Arroyo Stream Processing Engine"]
-        DeltaLake[("Delta Lake<br/>orders_current_state & orders_raw_events")]
-        IggyConsolidated -->|Stream ingestion| Arroyo
-        Arroyo -->|2PC Parquet Commit| DeltaLake
-    end
+    Client_Tier ~~~ API_Tier
+    API_Tier ~~~ Streaming_Fabric
+    Streaming_Fabric ~~~ Projection_Tier
+    Projection_Tier ~~~ Lakehouse_Tier
+    Projection_Tier ~~~ Enterprise_Tier    
 
-    subgraph Query_Service ["ferrous-cqrses Query Engine (query-service)"]
-        DataFusionEngine["Apache DataFusion Runtime<br/>• Flight SQL (:50051)<br/>• REST / Metrics (:8085)"]
-        DeltaLake -->|Vectorized Zero-Copy Scan| DataFusionEngine
-        DataFusionEngine -->|Sub-3ms Analytical Queries| APIHandler
-    end
+    %% Step 1: User Command Ingestion
+    Client -->|"1. Submit Request"| Command
+    CommandHandler -.->|"16. Live SSE Update"| Client
+
+    %% Step 2: Projections & Delta Lake Write
+    IggyEvents -->|"8. Consume orders/events"| OrderProjection
+    OrderProjection -->|"9. Commit Snapshots via delta-rs"| DeltaLake
+
+    %% Step 3: Domain Projection Consumption & Enterprise Call
+    IggyEvents -->|"10. Consume CreditIssuedEvent"| DomainProjection
+    DomainProjection -->|"11. Outbound Enterprise Dispatch"| EnterpriseWorkflow
+    EnterpriseWorkflow -->|"12. Private Network Response"| DomainProjection
+
+    %% Step 4: Callback Queue Placement & Handling
+    DomainProjection -->|"13. Place Response Payload"| IggyCallbacks
+    IggyCallbacks -->|"14. Consume Callback Message"| CallbackWorker
 ```
+
+#### How Command, Command Handler, Aggregate, and Projection Work Together:
+
+| Component | Concrete Implementation | Role in Lifecycle & Invariants |
+| :--- | :--- | :--- |
+| **Command** | `IssueCourtesyCreditCommand`<br/>`CancelOrderCommand`<br/>`SettleCourtesyCreditCommand`<br/>`FailCourtesyCreditSettlementCommand` | **Intent:** Immutable data contract encapsulating a user or worker request to modify state. Does not mutate state directly. |
+| **Command Handler** | `OrderCommandHandler`<br/>(`src/domain/order/handler.rs`) | **Orchestrator:** Interacts with `SierraDB` to rehydrate the `OrderAggregate` (`ESCAN`), delegates command execution to the aggregate, enforces aggregate versioning, atomically persists resulting events via `EAPPEND`, and broadcasts committed events to `Apache Iggy`. |
+| **Aggregate** | `OrderAggregate`<br/>(`src/domain/order/aggregate.rs`) | **Guardian of Invariants:** Domain entity maintaining internal state purely from past events. Evaluates business rules: e.g. **maximum $20 cumulative courtesy credit**, order lifecycle state compatibility (`Delivered`/`InTransit`), and emits uncommitted **Domain Events** (`CourtesyCreditIssued`, `OrderCancelled`, `CourtesyCreditSettled`). |
+| **Event Store** | `SierraDB` (Port 9090)<br/>(`src/sierra.rs`) | **Single Source of Truth:** Pure-Rust RESP3 append-only log. Ensures linear, atomic event ordering without table locks. |
+| **Domain Events** | `CourtesyCreditIssued`<br/>`OrderCancelled`<br/>`CourtesyCreditSettled`<br/>`CourtesyCreditSettlementFailed` | **Facts:** Immutable historical records published to Apache Iggy (`orders/events`) once durably committed to SierraDB. |
+| **Read Projection** | `order-projection`<br/>(`src/bin/order_projection.rs`) | **Read Model Materializer:** Consumes `orders/events` under consumer group `cg-order-projection`, purely folds events into state snapshots, and persists `orders_current_state` directly to **Delta Lake via `delta-rs`**. |
+| **Domain Projection (Saga)** | `order-saga`<br/>(`src/bin/order_saga.rs`) | **Process Manager (Saga):** Listens to `orders/events`, coordinates long-running side-effects with private internal enterprise backends (ERP, SAP), and deposits completed responses onto `orders/callbacks`. |
+| **Callback Loop** | `Callback Command Worker`<br/>(`src/callback.rs`) | **Closing the Loop:** Consumes enterprise responses from `orders/callbacks`, transforms them into a **`SettleCourtesyCreditCommand`** or **`FailCourtesyCreditSettlementCommand`**, and routes them back through the **Command Handler** to validate against the **Aggregate** and atomically commit terminal events to **SierraDB**. |
+
+---
+
+### 2. Query & Analytical Path (Read Flow)
+
+The Read Path focuses exclusively on low-latency analytical querying against Delta Lake:
+
+```mermaid
+flowchart TD
+    subgraph Client_Read ["Query Clients"]
+        ClientApp["API Gateway / BI Tools / Analytical Clients<br/>• REST / Flight SQL Queries"]
+    end
+
+    subgraph Query_Engine_Tier ["Embedded Analytical Engine (In-Process)"]
+        DataFusion["Apache DataFusion Runtime<br/>• In-process SessionContext<br/>• Vectorized SQL Execution (<3ms P95)<br/>• Arrow Flight SQL (:50051) & REST (:8085)"]
+    end
+
+    subgraph Storage_Tier ["Lakehouse Storage"]
+        DeltaLake[("Delta Lake Storage (/data/delta)<br/>• orders_current_state (Materialized Views)<br/>• orders_raw_events (Immutable Audit Log)<br/>• olist_orders (Historical Replay Dataset)")]
+    end
+
+    Client_Read -->|"1. Analytical Query (Flight SQL / REST)"| DataFusion
+    DataFusion -->|"2. Vectorized Parquet Scan (delta-rs log)"| DeltaLake
+    DataFusion -->|"3. Stream Arrow Batches / Query Result"| ClientApp
+```
+
+* **Sub-3ms Analytical Querying:** Powered by **Apache DataFusion** and `delta-rs`. Queries against `orders_current_state` and `orders_raw_events` execute in sub-3ms P95 latency via vectorized scans over Parquet files, without intermediate database proxies or serialization overhead.
+* **Separation of Concerns:** The Read Model contains zero write-side stream processing, ingestion pipelines, or replayer plumbing, ensuring a clean decoupling between the command execution path and query engine retrieval.
 
 ---
 
