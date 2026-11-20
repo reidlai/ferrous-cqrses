@@ -44,102 +44,103 @@ To clearly establish operational boundaries and demonstrate how domain component
 
 ---
 
-### 1. CQRS / ES Component Collaboration (Write & Saga Execution Path)
+### 1. CQRS / ES Architectural Collaboration (Write & Saga Execution Path)
 
-The Write Path demonstrates how **Command**, **Command Handler**, **Aggregate**, **Event Store (SierraDB)**, **Projections (Iggy & delta-rs)**, **Saga Manager (`order-saga`)**, and **Callback Worker (`callback.rs`)** collaborate to enforce business invariants, update read-model persistence, and coordinate asynchronous enterprise integrations:
+The Write Path demonstrates the fundamental CQRS and Event Sourcing lifecycle: how **Commands**, **Command Handlers**, **Domain Aggregates**, the **Event Store**, the **Streaming Fabric**, **Projections & Process Managers (Sagas)**, and **Callback Consumers** interact. The framework guarantees that business invariants are strictly enforced before appending events, read models are updated without side-effects, and external integrations operate asynchronously via decoupled callback queues:
 
 ```mermaid
 flowchart TD
-    subgraph Client_Tier ["Client & Ingress (Public Perimeter)"]
-        Client["Frontend Client / API Gateway<br/>• Dispatches Domain Commands<br/>• Subscribes to Real-Time SSE"]
+    subgraph Client_Tier ["Client & Ingress Tier (Public Perimeter)"]
+        Client["Client / API Gateway<br/>• Submits Domain Commands<br/>• Subscribes to Real-Time Updates (SSE)"]
     end
 
-    subgraph API_Tier ["Command Execution Engine (ferrous-cqrses & ferrous-api)"]
-        Command["Domain Commands<br/>• IssueCourtesyCreditCommand<br/>• CancelOrderCommand<br/>• SettleCourtesyCreditCommand"]
-        CommandHandler["OrderCommandHandler<br/>• 3. ESCAN from SierraDB<br/>• 4. Rehydrate Aggregate<br/>• 5. Invariant Evaluation<br/>• 6. EAPPEND to SierraDB<br/>• 7. Publish to Iggy Topic"]
-        Aggregate["OrderAggregate (Domain Model)<br/>• State: Status, Cumulative Credit<br/>• Invariant: Max $20 credit ceiling<br/>• Produces: CourtesyCreditIssued, Settled, Cancelled"]
-        CallbackWorker["Callback Command Worker (src/callback.rs)<br/>• Consumer Group: cg-order-callback<br/>• Generates Settle / Fail Commands"]
-        SierraDB[("SierraDB Event Store (Port 9090)<br/>• Pure-Rust RESP3 Protocol<br/>• ESCAN (Rehydrate) & EAPPEND (Atomic Append)")]
+    subgraph Command_Tier ["Command Execution Engine (Write Model)"]
+        Command["Domain Command (Intent Contract)<br/>• Immutable intent to mutate state<br/><i>Ref: IssueCourtesyCredit, CancelOrder</i>"]
+        CommandHandler["Command Handler (Application Service)<br/>• Rehydrates Aggregate via Event Store<br/>• Evaluates Business Invariants<br/>• Appends Events Atomically (EAPPEND)<br/>• Publishes to Event Bus<br/><i>Ref: OrderCommandHandler</i>"]
+        Aggregate["Domain Aggregate Root (Consistency Boundary)<br/>• Encapsulates State & Business Invariants<br/>• Reconstituted Purely from Historical Log<br/>• Produces Uncommitted Domain Events<br/><i>Ref: OrderAggregate</i>"]
+        CallbackWorker["Callback Gateway / Command Consumer<br/>• Ingests Asynchronous Integration Results<br/>• Translates Responses into Follow-up Commands<br/><i>Ref: CallbackService (src/callback.rs)</i>"]
+        EventStore[("Event Store (Append-Only Log)<br/>• Immutable Single Source of Truth<br/>• Linear, Conflict-Free Event Stream<br/><i>Ref: SierraDB RESP3 (:9090)</i>")]
 
-        Command -->|"2. Dispatch to Handler"| CommandHandler
-        SierraDB -->|"3. ESCAN from SierraDB"| Aggregate
-        Aggregate -->|"4. State to Handler"| CommandHandler
+        Command -->|"2. Dispatch Command"| CommandHandler
+        EventStore -->|"3. ESCAN (Stream Rehydration)"| Aggregate
+        Aggregate -->|"4. Aggregate State"| CommandHandler
         CommandHandler -->|"5. Invariant Evaluation"| Aggregate
-        CommandHandler -->|"6. EAPPEND Save to Stream"| SierraDB
-        CommandHandler -->|"7. Publish to Iggy Topic"| IggyEvents
-        CallbackWorker -->|"14. Settle / Fail Command"| CommandHandler        
+        CommandHandler -->|"6. EAPPEND (Atomic Persist)"| EventStore
+        CommandHandler -->|"7. Publish Committed Event"| DomainEventsBus
+        CallbackWorker -->|"14. Follow-up Command"| CommandHandler        
     end
 
-    subgraph Streaming_Fabric ["Message Broker & Event Bus (Apache Iggy)"]
-        IggyEvents["Topic: orders/events<br/>• Committed Domain Events<br/>(CourtesyCreditIssued, Settled, Cancelled)"]
-        IggyCallbacks["Topic: orders/callbacks<br/>• Inbound External Responses<br/>(CreditSettlementResponse)"]
+    subgraph Streaming_Fabric ["Streaming Fabric & Message Broker"]
+        DomainEventsBus["Domain Events Bus<br/>• Committed Domain Event Stream<br/><i>Ref: Iggy topic orders/events</i>"]
+        CallbackQueue["Callback / Integration Queue<br/>• Inbound External Workflow Responses<br/><i>Ref: Iggy topic orders/callbacks</i>"]
     end
 
-    subgraph Projection_Tier ["Projection & Process Manager Engine (ferrous-cqrses)"]
-        Projections["Projections (src/bin/order_projection.rs & order_saga.rs)<br/>• Consumer Groups: cg-order-projection / cg-order-saga<br/>• Delta Lake Materialization & Enterprise Dispatch"]
+    subgraph Projection_Tier ["Projection & Process Manager Engine"]
+        Projections["Projections & Process Managers (Sagas)<br/>• Read Projection: Side-effect-free Materialization<br/>• Process Manager: Cross-boundary Orchestrator<br/><i>Ref: order_projection & order_saga</i>"]
     end
 
-    subgraph Lakehouse_Tier ["Analytical Lakehouse Storage"]
-        DeltaLake[("Delta Lake Storage (/data/delta)<br/>• orders_current_state (Snapshots)<br/>• orders_raw_events (Audit Log)")]
+    subgraph Read_Store_Tier ["Materialized Read Store (Lakehouse)"]
+        ReadStore[("Read-Model Storage (Table Store)<br/>• Materialized Entity Snapshots<br/>• Immutable Historical Audit Log<br/><i>Ref: Delta Lake via delta-rs</i>")]
     end
 
-    subgraph Enterprise_Tier ["External Enterprise Network (Private / Partner)"]
-        EnterpriseWorkflow["Enterprise Workflow / ERP System<br/>(SAP / Core Banking / Clearing Partner)"]
+    subgraph External_Tier ["External Systems & Enterprise Workflows"]
+        ExternalSystem["External System / Enterprise Workflow<br/>• Third-Party / ERP / Partner Clearing<br/>• Asynchronous processing outside domain"]
     end        
 
-    Client_Tier ~~~ API_Tier
-    API_Tier ~~~ Streaming_Fabric
+    Client_Tier ~~~ Command_Tier
+    Command_Tier ~~~ Streaming_Fabric
     Streaming_Fabric ~~~ Projection_Tier
-    Projection_Tier ~~~ Lakehouse_Tier
-    Projection_Tier ~~~ Enterprise_Tier    
+    Projection_Tier ~~~ Read_Store_Tier
+    Projection_Tier ~~~ External_Tier    
 
-    %% Step 1: User Command Ingestion
-    Client -->|"1. Submit Request"| Command
-    CommandHandler -.->|"15. Live SSE Update"| Client
+    %% Step 1: Command Submission
+    Client -->|"1. Submit Command"| Command
+    CommandHandler -.->|"15. Real-Time Notification (SSE)"| Client
 
-    %% Step 2: Projections & Delta Lake Write
-    IggyEvents -->|"8. Consume orders/events"| Projections
-    Projections -->|"9. Commit Snapshots via delta-rs"| DeltaLake
+    %% Step 2: Read Model Materialization
+    DomainEventsBus -->|"8. Consume Committed Events"| Projections
+    Projections -->|"9. Commit Materialized Views"| ReadStore
 
-    %% Step 3: Enterprise Dispatch & Response
-    Projections -->|"10. Outbound Enterprise Dispatch"| EnterpriseWorkflow
-    EnterpriseWorkflow -->|"11. Private Network Response"| Projections
+    %% Step 3: Outbound Process Management & Integration
+    Projections -->|"10. Outbound Asynchronous Dispatch"| ExternalSystem
+    ExternalSystem -->|"11. Integration Response"| Projections
 
-    %% Step 4: Callback Queue Placement & Handling
-    Projections -->|"12. Place Response Payload"| IggyCallbacks
-    IggyCallbacks -->|"13. Consume Callback Message"| CallbackWorker
+    %% Step 4: Callback Queue Placement & Loop Closure
+    Projections -->|"12. Enqueue Integration Result"| CallbackQueue
+    CallbackQueue -->|"13. Ingest Callback Message"| CallbackWorker
 ```
 
-#### How Command, Command Handler, Aggregate, and Projection Work Together:
+#### How CQRS-ES Architectural Concepts Collaborate:
 
-| Component | Concrete Implementation | Role in Lifecycle & Invariants |
+| Architectural Concept | CQRS-ES Lifecycle Role & Responsibility | Concrete Reference Implementation (`ferrous-cqrses`) |
 | :--- | :--- | :--- |
-| **Command** | `IssueCourtesyCreditCommand`<br/>`CancelOrderCommand`<br/>`SettleCourtesyCreditCommand`<br/>`FailCourtesyCreditSettlementCommand` | **Intent:** Immutable data contract encapsulating a user or worker request to modify state. Does not mutate state directly. |
-| **Command Handler** | `OrderCommandHandler`<br/>(`src/domain/order/handler.rs`) | **Orchestrator:** Interacts with `SierraDB` to rehydrate the `OrderAggregate` (`ESCAN`), delegates command execution to the aggregate, enforces aggregate versioning, atomically persists resulting events via `EAPPEND`, and broadcasts committed events to `Apache Iggy`. |
-| **Aggregate** | `OrderAggregate`<br/>(`src/domain/order/aggregate.rs`) | **Guardian of Invariants:** Domain entity maintaining internal state purely from past events. Evaluates business rules: e.g. **maximum $20 cumulative courtesy credit**, order lifecycle state compatibility (`Delivered`/`InTransit`), and emits uncommitted **Domain Events** (`CourtesyCreditIssued`, `OrderCancelled`, `CourtesyCreditSettled`). |
-| **Event Store** | `SierraDB` (Port 9090)<br/>(`src/sierra.rs`) | **Single Source of Truth:** Pure-Rust RESP3 append-only log. Ensures linear, atomic event ordering without table locks. |
-| **Domain Events** | `CourtesyCreditIssued`<br/>`OrderCancelled`<br/>`CourtesyCreditSettled`<br/>`CourtesyCreditSettlementFailed` | **Facts:** Immutable historical records published to Apache Iggy (`orders/events`) once durably committed to SierraDB. |
-| **Projections** | `order-projection` (`src/bin/order_projection.rs`)<br/>`order-saga` (`src/bin/order_saga.rs`) | **State Materialization & Process Management:** Consumes `orders/events` under consumer groups `cg-order-projection` and `cg-order-saga`. Folds events into `orders_current_state` snapshots directly on **Delta Lake via `delta-rs`** (read projection) while coordinating long-running enterprise side-effects and queueing response payloads onto `orders/callbacks` (domain saga / process manager). |
-| **Callback Loop** | `Callback Command Worker`<br/>(`src/callback.rs`) | **Closing the Loop:** Consumes enterprise responses from `orders/callbacks`, transforms them into a **`SettleCourtesyCreditCommand`** or **`FailCourtesyCreditSettlementCommand`**, and routes them back through the **Command Handler** to validate against the **Aggregate** and atomically commit terminal events to **SierraDB**. |
+| **Domain Command** | **Intent Contract:** Immutable data contract encapsulating an external or internal actor's intent to modify state. Does not mutate state directly. | `IssueCourtesyCreditCommand`<br/>`CancelOrderCommand`<br/>`SettleCourtesyCreditCommand`<br/>`FailCourtesyCreditSettlementCommand` |
+| **Command Handler** | **Execution Orchestrator:** Interacts with the Event Store to stream historical events, rehydrates the target aggregate root, validates concurrency/versioning, delegates invariant evaluation, atomically appends resulting events, and publishes to the event broker. | `OrderCommandHandler`<br/>(`src/domain/order/handler.rs`) |
+| **Domain Aggregate (Root)** | **Guardian of Invariants:** Consistency boundary and state machine maintained strictly by folding historical events (`apply`). Evaluates incoming commands against current domain rules and yields uncommitted domain events if valid, or rejects with strongly typed domain errors. | `OrderAggregate`<br/>(`src/domain/order/aggregate.rs`) |
+| **Event Store** | **Single Source of Truth:** High-performance, append-only, immutable linear log guaranteeing strict sequential ordering per stream. Supports stream replay (`ESCAN`) and atomic persistence (`EAPPEND`) without locking relational tables. | `SierraDB` (Port 9090, pure-Rust RESP3 engine)<br/>(`src/sierra.rs`) |
+| **Domain Events** | **Historical Facts:** Immutable historical records signifying facts that have already occurred and been durably committed. Broadcast to message brokers for downstream consumption. | `CourtesyCreditIssued`<br/>`OrderCancelled`<br/>`CourtesyCreditSettled`<br/>`CourtesyCreditSettlementFailed` |
+| **Read Projection** | **Read-Model Materializer:** Consumes domain events and purely folds state into optimized read tables without performing side-effects, guaranteeing that replaying events from genesis produces identical read models deterministically. | `order-projection` (`src/bin/order_projection.rs`), writing Delta Lake Parquet snapshots via `delta-rs`. |
+| **Process Manager (Saga)** | **Cross-Boundary Orchestrator:** Listens to committed domain events to coordinate complex, long-running workflows with external systems. Encapsulates side-effects outside of the read model so that historical event replay remains pure. | `order-saga` (`src/bin/order_saga.rs`, `src/saga.rs`) |
+| **Callback Gateway** | **Asynchronous Loop Closure:** Ingests external responses from dedicated callback queues, enforces deduplication and idempotency, translates integration results into follow-up domain commands, and routes them through the command handler to update aggregate state. | `CallbackService` / `Callback Command Worker`<br/>(`src/callback.rs`) |
 
 ---
 
 ### 2. Query & Analytical Path (Read Flow)
 
-The Read Path focuses exclusively on low-latency analytical querying against Delta Lake:
+The Read Path focuses exclusively on low-latency analytical querying against the materialized read store:
 
 ```mermaid
 flowchart TD
-    subgraph Client_Read ["Query Clients"]
-        ClientApp["API Gateway / BI Tools / Analytical Clients<br/>• REST / Flight SQL Queries"]
+    subgraph Client_Read ["Query Clients & Downstream Consumers"]
+        ClientApp["API Gateway / BI Tools / Analytical Clients<br/>• REST / Arrow Flight SQL Queries"]
     end
 
     subgraph Query_Engine_Tier ["Embedded Analytical Engine (In-Process)"]
-        DataFusion["Apache DataFusion Runtime<br/>• In-process SessionContext<br/>• Vectorized SQL Execution (<3ms P95)<br/>• Arrow Flight SQL (:50051) & REST (:8085)"]
+        DataFusion["Vectorized Query Runtime (Apache DataFusion)<br/>• In-process SessionContext<br/>• Vectorized SQL Execution (<3ms P95)<br/>• Arrow Flight SQL (:50051) & REST (:8085)"]
     end
 
-    subgraph Storage_Tier ["Lakehouse Storage"]
-        DeltaLake[("Delta Lake Storage (/data/delta)<br/>• orders_current_state (Materialized Views)<br/>• orders_raw_events (Immutable Audit Log)<br/>• olist_orders (Historical Replay Dataset)")]
+    subgraph Storage_Tier ["Materialized Read Store (Lakehouse)"]
+        DeltaLake[("Delta Lake Table Store (/data/delta)<br/>• Materialized View Snapshots<br/>• Immutable Raw Event Audit Log<br/>• Historical Datasets (olist_*)")]
     end
 
     Client_Read -->|"1. Analytical Query (Flight SQL / REST)"| DataFusion
@@ -189,40 +190,40 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Event_Bus ["Apache Iggy Broker (orders Stream)"]
-        IggyEvents["Topic: events / orders/events<br/>• Committed Domain Events"]
-        IggyCallbacks["Topic: callbacks / orders/callbacks<br/>• Inbound External Responses"]
+    subgraph Event_Bus ["Streaming Fabric & Message Broker"]
+        DomainEventsBus["Domain Events Bus<br/>• Committed Domain Event Stream<br/><i>Ref: Iggy topic orders/events</i>"]
+        CallbackQueue["Callback / Integration Queue<br/>• Inbound External Workflow Responses<br/><i>Ref: Iggy topic orders/callbacks</i>"]
     end
 
-    subgraph Saga_Tier ["Outbound Saga Process Manager (src/bin/order_saga.rs)"]
-        OrderSaga["OrderSagaManager<br/>• Consumer Group: cg-order-saga<br/>• Consumes CreditIssuedEvent<br/>• Preserves Replay Purity"]
-        Dispatcher["EnterpriseDispatcher<br/>• HttpEnterpriseDispatcher<br/>• Exponential Backoff & Retries"]
+    subgraph Saga_Tier ["Outbound Process Manager / Saga"]
+        ProcessManager["Process Manager (Saga Engine)<br/>• Consumes Domain Events<br/>• Preserves Replay Purity<br/><i>Ref: OrderSagaManager (src/bin/order_saga.rs)</i>"]
+        Dispatcher["Outbound Dispatcher<br/>• Exponential Backoff & Retries<br/><i>Ref: HttpEnterpriseDispatcher</i>"]
     end
 
-    subgraph External_Systems ["External Enterprise / Payment Systems"]
+    subgraph External_Systems ["External Systems & Enterprise Workflows"]
         ExternalAPI["External ERP / Clearing Gateway<br/>(Private Enterprise Network)"]
     end
 
-    subgraph Callback_Tier ["Inbound Callback Service (src/callback.rs)"]
-        CallbackService["CallbackService<br/>• Consumer Group: cg-order-callback<br/>• Invariant Validation & Idempotency"]
-        CmdHandler["CommandHandler<br/>• Evaluates Settle/Fail Commands<br/>• Atomically Appends (EAPPEND)"]
+    subgraph Callback_Tier ["Inbound Callback Gateway & Command Service"]
+        CallbackService["Callback Ingestion Service<br/>• Invariant Validation & Idempotency<br/><i>Ref: CallbackService (src/callback.rs)</i>"]
+        CmdHandler["Command Handler (Application Service)<br/>• Evaluates Follow-up Commands<br/>• Atomically Appends via EAPPEND"]
     end
 
     subgraph Storage_Tier ["Event Storage"]
-        SierraDB[("SierraDB Event Store<br/>(Port 9090)")]
+        EventStore[("Event Store (Append-Only Log)<br/>• Immutable Single Source of Truth<br/><i>Ref: SierraDB RESP3 (:9090)</i>")]
     end
 
     %% Outbound Flow
-    IggyEvents -->|"1. Consume Event"| OrderSaga
-    OrderSaga -->|"2. Correlated Dispatch"| Dispatcher
+    DomainEventsBus -->|"1. Consume Event"| ProcessManager
+    ProcessManager -->|"2. Correlated Dispatch"| Dispatcher
     Dispatcher -->|"3. Outbound Call"| ExternalAPI
-    ExternalAPI -->|"4. Async Response"| IggyCallbacks
+    ExternalAPI -->|"4. Async Response"| CallbackQueue
 
     %% Inbound Callback Flow
-    IggyCallbacks -->|"5. Consume Callback"| CallbackService
-    CallbackService -->|"6. Handle Command"| CmdHandler
-    CmdHandler <-->|"7. EAPPEND Commit"| SierraDB
-    CallbackService -->|"8. Publish Settled/Failed Event"| IggyEvents
+    CallbackQueue -->|"5. Ingest Callback"| CallbackService
+    CallbackService -->|"6. Dispatch Command"| CmdHandler
+    CmdHandler <-->|"7. EAPPEND Commit"| EventStore
+    CallbackService -->|"8. Publish Committed Event"| DomainEventsBus
 ```
 
 ### 1. Outbound Saga Process Manager (`OrderSagaManager`)
