@@ -6,8 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregate::{OrderAggregate, OrderStatus};
-use crate::error::DomainError;
+use super::aggregate::{OrderAggregate, OrderStatus};
+use super::error::DomainError;
 
 fn default_delivery_sla() -> DateTime<Utc> {
     Utc::now()

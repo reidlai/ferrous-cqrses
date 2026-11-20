@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use crate::aggregate::MAX_COURTESY_CREDIT_CENTS;
+use super::aggregate::MAX_COURTESY_CREDIT_CENTS;
+use super::error::DomainError;
+use super::events::DomainEvent;
 use crate::consumer::{Config, InMemoryStreamConsumer, ReceivedMessage, StreamConsumer};
-use crate::error::DomainError;
-use crate::events::DomainEvent;
 
 /// Configuration options for the order saga process manager daemon.
 #[derive(Clone, PartialEq, Eq, Parser, Serialize, Deserialize)]

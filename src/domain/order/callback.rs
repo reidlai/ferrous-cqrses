@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::commands::{
+use super::commands::{
     FailCourtesyCreditSettlementCommand, OrderCommand, SettleCourtesyCreditCommand,
 };
-use crate::error::DomainError;
-use crate::events::DomainEvent;
-use crate::handler::CommandHandler;
+use super::error::DomainError;
+use super::events::DomainEvent;
+use super::handler::CommandHandler;
 use crate::publisher::StreamPublisher;
 
 /// Default Apache Iggy topic name for incoming callback responses.
