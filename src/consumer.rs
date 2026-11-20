@@ -8,17 +8,20 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::aggregate::OrderAggregate;
 use crate::commands::OrderCommand;
 use crate::error::DomainError;
 use crate::events::DomainEvent;
 use crate::handler::CommandHandler;
 use crate::projection::ConsolidatedOrderProjection;
 use crate::publisher::{InMemoryStreamPublisher, StreamPublisher};
+use crate::sierra::{stream_id_for_order, EventStore, InMemoryEventStore};
 
 /// Configuration options for the command consumer and streaming broker connection.
 #[derive(Debug, Clone, PartialEq, Eq, Parser, Serialize, Deserialize)]
@@ -49,6 +52,10 @@ pub struct Config {
     #[arg(long, env = "TOPIC_ORDERS_INTAKE", default_value = "intake")]
     pub topic_orders_intake: String,
 
+    /// Inbound domain events topic name
+    #[arg(long, env = "TOPIC_ORDERS_EVENTS", default_value = "events")]
+    pub topic_orders_events: String,
+
     /// Target consolidated order projections topic name
     #[arg(
         long,
@@ -60,6 +67,10 @@ pub struct Config {
     /// Consumer group name for sequential partitioned consumption
     #[arg(long, env = "CONSUMER_GROUP", default_value = "cg-cmd-handler")]
     pub consumer_group: String,
+
+    /// SierraDB distributed event store TCP address
+    #[arg(long, env = "SIERRADB_URL", default_value = "127.0.0.1:9090")]
+    pub sierradb_url: String,
 
     /// Execute static healthcheck probe and exit immediately
     #[arg(long, default_value_t = false)]
@@ -74,8 +85,10 @@ impl Default for Config {
             iggy_password: "iggy".to_string(),
             stream_name: "orders".to_string(),
             topic_orders_intake: "intake".to_string(),
+            topic_orders_events: "events".to_string(),
             topic_orders_consolidated: "consolidated".to_string(),
             consumer_group: "cg-cmd-handler".to_string(),
+            sierradb_url: "127.0.0.1:9090".to_string(),
             healthcheck: false,
         }
     }
@@ -589,6 +602,302 @@ impl<S: StreamConsumer, P: StreamPublisher> CommandConsumer<S, P> {
         }
 
         info!("Graceful shutdown requested; exiting consumer loop");
+        Ok(())
+    }
+}
+
+/// Outcome of processing a received domain event message in order-projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionOutcome {
+    /// Domain event successfully processed and consolidated projection snapshot published.
+    Success {
+        offset: u64,
+        partition_id: u32,
+        order_id: String,
+        credit_delta: i64,
+        published_offset: u64,
+    },
+    /// Message payload could not be deserialized into a valid [`DomainEvent`].
+    DeserializationError {
+        offset: u64,
+        partition_id: u32,
+        error: String,
+    },
+}
+
+impl ProjectionOutcome {
+    pub fn offset(&self) -> u64 {
+        match self {
+            Self::Success { offset, .. } => *offset,
+            Self::DeserializationError { offset, .. } => *offset,
+        }
+    }
+
+    pub fn partition_id(&self) -> u32 {
+        match self {
+            Self::Success { partition_id, .. } => *partition_id,
+            Self::DeserializationError { partition_id, .. } => *partition_id,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+}
+
+/// Dedicated order projection consumer consuming `DomainEvent` records from `orders/events`,
+/// reconstructing/updating [`OrderAggregate`] state snapshots, and publishing
+/// [`ConsolidatedOrderProjection`] snapshots to `orders/consolidated`.
+pub struct ProjectionConsumer<
+    S: StreamConsumer = InMemoryStreamConsumer,
+    P: StreamPublisher = InMemoryStreamPublisher,
+> {
+    config: Config,
+    event_store: Arc<dyn EventStore>,
+    aggregates: HashMap<String, OrderAggregate>,
+    stream: S,
+    publisher: P,
+    outcomes: Vec<ProjectionOutcome>,
+}
+
+impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
+    /// Creates a new projection consumer with in-memory event store fallback.
+    pub fn new(config: Config, stream: S, publisher: P) -> Self {
+        Self {
+            config,
+            event_store: Arc::new(InMemoryEventStore::new()),
+            aggregates: HashMap::new(),
+            stream,
+            publisher,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// Creates a projection consumer with an explicit [`EventStore`] (e.g. SierraDB).
+    pub fn with_store(
+        config: Config,
+        stream: S,
+        publisher: P,
+        event_store: Arc<dyn EventStore>,
+    ) -> Self {
+        Self {
+            config,
+            event_store,
+            aggregates: HashMap::new(),
+            stream,
+            publisher,
+            outcomes: Vec::new(),
+        }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn stream(&self) -> &S {
+        &self.stream
+    }
+
+    pub fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    pub fn publisher(&self) -> &P {
+        &self.publisher
+    }
+
+    pub fn publisher_mut(&mut self) -> &mut P {
+        &mut self.publisher
+    }
+
+    pub fn outcomes(&self) -> &[ProjectionOutcome] {
+        &self.outcomes
+    }
+
+    pub fn clear_outcomes(&mut self) {
+        self.outcomes.clear();
+    }
+
+    pub fn aggregates(&self) -> &HashMap<String, OrderAggregate> {
+        &self.aggregates
+    }
+
+    pub fn insert_aggregate(&mut self, aggregate: OrderAggregate) {
+        self.aggregates.insert(aggregate.order_id.clone(), aggregate);
+    }
+
+    /// Processes a single received message: deserializes JSON DomainEvent, updates
+    /// aggregate projection, publishes consolidated snapshot to `orders/consolidated`,
+    /// and acknowledges stream offset.
+    pub async fn process_message(
+        &mut self,
+        message: ReceivedMessage,
+    ) -> Result<ProjectionOutcome, DomainError> {
+        let offset = message.offset;
+        let partition_id = message.partition_id;
+
+        // 1. Attempt deserialization of DomainEvent from JSON payload
+        let event: DomainEvent = match serde_json::from_slice(&message.payload) {
+            Ok(evt) => evt,
+            Err(err) => {
+                let err_msg = err.to_string();
+                error!(
+                    partition_id = partition_id,
+                    offset = offset,
+                    error = %err_msg,
+                    "Failed to deserialize JSON message payload into DomainEvent"
+                );
+                self.stream.acknowledge(partition_id, offset).await?;
+                let outcome = ProjectionOutcome::DeserializationError {
+                    offset,
+                    partition_id,
+                    error: err_msg,
+                };
+                self.outcomes.push(outcome.clone());
+                return Ok(outcome);
+            }
+        };
+
+        let order_id = event.order_id().to_string();
+        let credit_delta = match &event {
+            DomainEvent::CreditIssued(ref e) => e.amount_cents,
+            _ => 0,
+        };
+
+        // 2. Rehydrate or update aggregate state
+        let mut aggregate = match self.aggregates.get(&order_id) {
+            Some(agg) => agg.clone(),
+            None => {
+                let stream_id = stream_id_for_order(&order_id);
+                let historical = self.event_store.scan(&stream_id).await?;
+                if !historical.is_empty() {
+                    OrderAggregate::from_events(&historical)?
+                } else {
+                    match &event {
+                        DomainEvent::OrderCreated(e) => {
+                            let mut a = OrderAggregate::new(
+                                &e.order_id,
+                                &e.customer_id,
+                                e.total_freight_cents,
+                                e.delivery_sla,
+                            );
+                            a.version = e.version;
+                            a
+                        }
+                        _ => OrderAggregate::new(&order_id, "", 0, event.timestamp()),
+                    }
+                }
+            }
+        };
+
+        if event.version() > aggregate.version {
+            aggregate.apply(&event)?;
+        }
+
+        // 3. Construct ConsolidatedOrderProjection snapshot
+        let projection = ConsolidatedOrderProjection::from_aggregate(
+            &aggregate,
+            credit_delta,
+            event.timestamp(),
+        );
+        let payload = projection.to_json_bytes()?;
+
+        // 4. Bounded retry publishing to topic_orders_consolidated
+        let mut attempts = 0;
+        let published_offset = loop {
+            match self
+                .publisher
+                .publish(&self.config.topic_orders_consolidated, &order_id, &payload)
+                .await
+            {
+                Ok(off) => break off,
+                Err(err) if attempts < 3 => {
+                    attempts += 1;
+                    warn!(
+                        order_id = %order_id,
+                        attempt = attempts,
+                        error = %err,
+                        "Retrying transient publisher error in projection consumer"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20 * attempts as u64)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        };
+
+        info!(
+            partition_id = partition_id,
+            order_id = %order_id,
+            topic = %self.config.topic_orders_consolidated,
+            offset = published_offset,
+            credit_issued = aggregate.courtesy_credit_cents,
+            credit_delta = credit_delta,
+            "Published consolidated order projection snapshot from domain event"
+        );
+
+        // 5. Update cached aggregate and acknowledge offset
+        self.aggregates.insert(order_id.clone(), aggregate);
+        self.stream.acknowledge(partition_id, offset).await?;
+        if self.outcomes.len() >= 1000 {
+            self.outcomes.drain(0..100);
+        }
+        let outcome = ProjectionOutcome::Success {
+            offset,
+            partition_id,
+            order_id,
+            credit_delta,
+            published_offset,
+        };
+        self.outcomes.push(outcome.clone());
+
+        Ok(outcome)
+    }
+
+    pub async fn process_next(&mut self) -> Result<Option<ProjectionOutcome>, DomainError> {
+        match self.stream.poll_message().await? {
+            Some(msg) => {
+                let outcome = self.process_message(msg).await?;
+                Ok(Some(outcome))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn process_all_available(&mut self) -> Result<usize, DomainError> {
+        let mut count = 0;
+        while let Some(_outcome) = self.process_next().await? {
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn run_loop(
+        &mut self,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), DomainError> {
+        info!("Entering projection consumer processing loop");
+
+        while !*shutdown_rx.borrow() {
+            match self.process_next().await {
+                Ok(Some(_outcome)) => continue,
+                Ok(None) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                        res = shutdown_rx.changed() => {
+                            if res.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!(error = %err, "Error in projection consumer loop");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+
+        info!("Graceful shutdown requested; exiting projection consumer loop");
         Ok(())
     }
 }

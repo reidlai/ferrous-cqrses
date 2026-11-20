@@ -539,6 +539,7 @@ async fn test_config_parsing_and_defaults() {
     assert_eq!(default_config.topic_orders_intake, "intake");
     assert_eq!(default_config.topic_orders_consolidated, "consolidated");
     assert_eq!(default_config.consumer_group, "cg-cmd-handler");
+    assert_eq!(default_config.sierradb_url, "127.0.0.1:9090");
     assert!(!default_config.healthcheck);
 
     // CLI argument parsing test
@@ -554,6 +555,8 @@ async fn test_config_parsing_and_defaults() {
         "custom_consolidated",
         "--consumer-group",
         "custom_cg",
+        "--sierradb-url",
+        "10.0.0.99:9090",
     ];
     let parsed = Config::try_parse_from(args).expect("CLI parsing must succeed");
     assert_eq!(parsed.iggy_server_address, "10.0.0.5:8090");
@@ -561,6 +564,7 @@ async fn test_config_parsing_and_defaults() {
     assert_eq!(parsed.topic_orders_intake, "custom_intake");
     assert_eq!(parsed.topic_orders_consolidated, "custom_consolidated");
     assert_eq!(parsed.consumer_group, "custom_cg");
+    assert_eq!(parsed.sierradb_url, "10.0.0.99:9090");
 }
 
 #[tokio::test]

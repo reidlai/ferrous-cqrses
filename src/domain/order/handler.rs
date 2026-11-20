@@ -3,9 +3,10 @@
 //! Provides the core [`CommandHandler`] responsible for validating domain business
 //! invariants (including AD-17 courtesy credit cap and valid lifecycle state transitions),
 //! enforcing command idempotency, rehydrating order aggregates from historical events,
-//! and mutating aggregate states sequentially.
+//! and mutating aggregate states sequentially backed by an [`EventStore`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -15,22 +16,73 @@ use crate::commands::{
 };
 use crate::error::DomainError;
 use crate::events::{CreditIssuedEvent, DomainEvent, OrderCancelledEvent, OrderCreatedEvent};
+use crate::sierra::{
+    stream_id_for_order, EventStore, ExpectedVersion, InMemoryEventStore, SierraDbEventStore,
+};
 
 /// Sequential command processor and aggregate state manager.
 ///
-/// Maintains in-memory aggregate state cache, event history per order, and tracks
-/// processed command IDs to enforce monotonic idempotency without race conditions.
-#[derive(Debug, Default, Clone)]
+/// Maintains an in-memory aggregate state cache, event history per order, and tracks
+/// processed command IDs to enforce monotonic idempotency without race conditions,
+/// delegating durable event persistence and concurrency checks to an [`EventStore`].
+#[derive(Debug, Clone)]
 pub struct CommandHandler {
     aggregates: HashMap<String, OrderAggregate>,
-    event_store: HashMap<String, Vec<DomainEvent>>,
+    event_store: Arc<dyn EventStore>,
+    event_cache: HashMap<String, Vec<DomainEvent>>,
     processed_commands: HashSet<Uuid>,
 }
 
+impl Default for CommandHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandHandler {
-    /// Creates a newly initialized, empty command handler instance.
+    /// Creates a newly initialized command handler backed by an [`InMemoryEventStore`].
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            aggregates: HashMap::new(),
+            event_store: Arc::new(InMemoryEventStore::new()),
+            event_cache: HashMap::new(),
+            processed_commands: HashSet::new(),
+        }
+    }
+
+    /// Creates a command handler with a custom [`EventStore`] implementation.
+    pub fn new_with_store(store: Arc<dyn EventStore>) -> Self {
+        Self {
+            aggregates: HashMap::new(),
+            event_store: store,
+            event_cache: HashMap::new(),
+            processed_commands: HashSet::new(),
+        }
+    }
+
+    /// Alias for [`new_with_store`].
+    pub fn with_store(store: Arc<dyn EventStore>) -> Self {
+        Self::new_with_store(store)
+    }
+
+    /// Connects to a SierraDB instance at `addr` and returns a configured command handler.
+    pub async fn connect_sierra(addr: &str) -> Result<Self, DomainError> {
+        let store = SierraDbEventStore::connect(addr).await?;
+        Ok(Self::new_with_store(Arc::new(store)))
+    }
+
+    /// Ensures the order aggregate is loaded into memory by scanning the event stream if un-cached.
+    pub async fn ensure_aggregate_loaded(&mut self, order_id: &str) -> Result<(), DomainError> {
+        if !self.aggregates.contains_key(order_id) {
+            let stream_id = stream_id_for_order(order_id);
+            let events = self.event_store.scan(&stream_id).await?;
+            if !events.is_empty() {
+                let aggregate = OrderAggregate::from_events(&events)?;
+                self.aggregates.insert(order_id.to_string(), aggregate);
+                self.event_cache.insert(order_id.to_string(), events);
+            }
+        }
+        Ok(())
     }
 
     /// Handles an incoming [`OrderCommand`] asynchronously, validating domain invariants
@@ -89,6 +141,8 @@ impl CommandHandler {
             return Err(DomainError::InvalidAmount(cmd.total_freight_cents));
         }
 
+        self.ensure_aggregate_loaded(&order_id).await?;
+
         if self.aggregates.contains_key(&order_id) {
             warn!(order_id = %order_id, "CreateOrder rejected: order already exists");
             return Err(DomainError::OrderAlreadyExists(order_id));
@@ -111,8 +165,13 @@ impl CommandHandler {
 
         aggregate.apply(&domain_event)?;
 
-        self.aggregates.insert(order_id.clone(), aggregate);
+        let stream_id = stream_id_for_order(&order_id);
         self.event_store
+            .append(&stream_id, &domain_event, ExpectedVersion::Empty)
+            .await?;
+
+        self.aggregates.insert(order_id.clone(), aggregate);
+        self.event_cache
             .entry(order_id)
             .or_default()
             .push(domain_event.clone());
@@ -133,6 +192,8 @@ impl CommandHandler {
         cmd: IssueCourtesyCreditCommand,
     ) -> Result<DomainEvent, DomainError> {
         let command_id = cmd.command_id;
+
+        self.ensure_aggregate_loaded(&cmd.order_id).await?;
 
         let aggregate = match self.aggregates.get_mut(&cmd.order_id) {
             Some(agg) => agg,
@@ -183,9 +244,29 @@ impl CommandHandler {
             CreditIssuedEvent::new(&cmd.order_id, cmd.amount_cents, &cmd.reason, next_version);
         let domain_event = DomainEvent::CreditIssued(event);
 
+        // In SierraDB, expected stream version is 0-indexed (prior stream version = aggregate.version - 1)
+        let expected_version = if aggregate.version == 0 {
+            ExpectedVersion::Empty
+        } else {
+            ExpectedVersion::Exact(aggregate.version - 1)
+        };
+
+        let stream_id = stream_id_for_order(&cmd.order_id);
+        if let Err(e) = self
+            .event_store
+            .append(&stream_id, &domain_event, expected_version)
+            .await
+        {
+            if matches!(e, DomainError::VersionMismatch { .. }) {
+                self.aggregates.remove(&cmd.order_id);
+                self.event_cache.remove(&cmd.order_id);
+            }
+            return Err(e);
+        }
+
         aggregate.apply(&domain_event)?;
 
-        self.event_store
+        self.event_cache
             .entry(cmd.order_id.clone())
             .or_default()
             .push(domain_event.clone());
@@ -209,6 +290,8 @@ impl CommandHandler {
         cmd: CancelOrderCommand,
     ) -> Result<DomainEvent, DomainError> {
         let command_id = cmd.command_id;
+
+        self.ensure_aggregate_loaded(&cmd.order_id).await?;
 
         let aggregate = match self.aggregates.get_mut(&cmd.order_id) {
             Some(agg) => agg,
@@ -238,9 +321,28 @@ impl CommandHandler {
         let event = OrderCancelledEvent::new(&cmd.order_id, &cmd.reason, next_version);
         let domain_event = DomainEvent::OrderCancelled(event);
 
+        let expected_version = if aggregate.version == 0 {
+            ExpectedVersion::Empty
+        } else {
+            ExpectedVersion::Exact(aggregate.version - 1)
+        };
+
+        let stream_id = stream_id_for_order(&cmd.order_id);
+        if let Err(e) = self
+            .event_store
+            .append(&stream_id, &domain_event, expected_version)
+            .await
+        {
+            if matches!(e, DomainError::VersionMismatch { .. }) {
+                self.aggregates.remove(&cmd.order_id);
+                self.event_cache.remove(&cmd.order_id);
+            }
+            return Err(e);
+        }
+
         aggregate.apply(&domain_event)?;
 
-        self.event_store
+        self.event_cache
             .entry(cmd.order_id.clone())
             .or_default()
             .push(domain_event.clone());
@@ -260,10 +362,10 @@ impl CommandHandler {
     /// in the event of an unrecoverable downstream publishing failure.
     pub fn rollback_last_event(&mut self, order_id: &str, command_id: &Uuid) {
         self.processed_commands.remove(command_id);
-        if let Some(events) = self.event_store.get_mut(order_id) {
+        if let Some(events) = self.event_cache.get_mut(order_id) {
             events.pop();
             if events.is_empty() {
-                self.event_store.remove(order_id);
+                self.event_cache.remove(order_id);
                 self.aggregates.remove(order_id);
             } else if let Ok(rehydrated) = OrderAggregate::from_events(events.as_slice()) {
                 self.aggregates.insert(order_id.to_string(), rehydrated);
@@ -283,12 +385,22 @@ impl CommandHandler {
         }
         let aggregate = OrderAggregate::from_events(events)?;
         self.aggregates.insert(order_id.to_string(), aggregate);
-        self.event_store
+        self.event_cache
             .insert(order_id.to_string(), events.to_vec());
         Ok(self
             .aggregates
             .get(order_id)
             .expect("Aggregate just inserted"))
+    }
+
+    /// Rehydrates an aggregate directly from the configured [`EventStore`].
+    pub async fn rehydrate_from_store(
+        &mut self,
+        order_id: &str,
+    ) -> Result<&OrderAggregate, DomainError> {
+        let stream_id = stream_id_for_order(order_id);
+        let events = self.event_store.scan(&stream_id).await?;
+        self.rehydrate(order_id, &events)
     }
 
     /// Manually inserts or overrides an aggregate in the state cache (useful for testing states).
@@ -307,9 +419,9 @@ impl CommandHandler {
         self.aggregates.get_mut(order_id)
     }
 
-    /// Returns historical domain events for an order.
+    /// Returns historical domain events for an order from local cache.
     pub fn get_events(&self, order_id: &str) -> Option<&[DomainEvent]> {
-        self.event_store.get(order_id).map(|v| v.as_slice())
+        self.event_cache.get(order_id).map(|v| v.as_slice())
     }
 
     /// Returns a reference to all cached aggregates.
@@ -317,8 +429,13 @@ impl CommandHandler {
         &self.aggregates
     }
 
-    /// Returns a reference to the event store.
+    /// Returns a reference to the local event cache for backward compatibility.
     pub fn event_store(&self) -> &HashMap<String, Vec<DomainEvent>> {
+        &self.event_cache
+    }
+
+    /// Returns a reference to the configured [`EventStore`].
+    pub fn store(&self) -> &Arc<dyn EventStore> {
         &self.event_store
     }
 

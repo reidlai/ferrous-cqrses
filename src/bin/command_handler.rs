@@ -1,5 +1,6 @@
 use clap::Parser;
 use ferrous_cqrses::consumer::{CommandConsumer, Config, IggyStreamConsumer};
+use ferrous_cqrses::handler::CommandHandler;
 use ferrous_cqrses::publisher::IggyStreamPublisher;
 use tracing::info;
 
@@ -90,7 +91,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stream = IggyStreamConsumer::new(config.clone());
     let publisher = IggyStreamPublisher::new(config.clone());
-    let mut consumer = CommandConsumer::new(config, stream, publisher);
+    let handler = match CommandHandler::connect_sierra(&config.sierradb_url).await {
+        Ok(h) => {
+            info!(sierradb_url = %config.sierradb_url, "Connected to SierraDB event store");
+            h
+        }
+        Err(e) => {
+            info!(
+                sierradb_url = %config.sierradb_url,
+                error = %e,
+                "SierraDB connection failed; running with in-memory event store"
+            );
+            CommandHandler::new()
+        }
+    };
+    let mut consumer = CommandConsumer::with_handler(config, stream, publisher, handler);
 
     // Spawn periodic heartbeat updater on /tmp/daemon_heartbeat for container healthcheck probe
     tokio::spawn(async {
