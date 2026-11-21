@@ -25,11 +25,9 @@
    - Acts symmetrically to `CommandHandler`: rehydrates `OrderAggregate` (`ESCAN`), evaluates domain invariants, and atomically commits resulting domain events (`CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`) via `EAPPEND` to SierraDB.
    - Publishes committed domain state to Apache Iggy (**`orders/consolidated`**) with automatic rollback on publisher failures.
 
-### B. Query Side (Read Path & Analytical Serving)
-4. **DataFusion Analytical Query Engine (`query-service`):**  
-   Standalone vectorized query service and embedded Lakehouse query runtime powered by **Apache DataFusion** and `delta-rs`:
-   - Executes sub-3ms analytical queries over materialized Delta Lake read models (`orders_current_state`, `orders_raw_events`, and historical `olist_*` tables).
-   - Exposes **Arrow Flight SQL** (port `50051`) for high-throughput binary Arrow streaming and **HTTP REST** (port `8085`) for interactive SQL queries (`/api/v1/query`), catalog introspection, and health monitoring.
+### B. Query Side (Canonical Query Contracts & Embedded Engine Boundary)
+4. **Canonical Query Contracts (`src/domain/order/queries.rs`, AD-32):**  
+   Exports strongly typed, read-only CQRS Query structs (`GetOrderQuery`, `ListOrdersQuery`) consumed by **`ferrous-api`**, which executes them in-process via its embedded **Apache DataFusion** `OrderQueryEngine` over Delta Lake materialized views (`orders_current_state`, `orders_raw_events`). *(Standalone BI/OLAP query servers and the Agentic Path are deferred to Release 2 per AD-30.)*
 
 ---
 
@@ -122,31 +120,38 @@ flowchart TD
 
 ---
 
-### 2. Query & Analytical Path (Read Flow)
+### 2. CQRS / ES Query Model (Read Flow)
 
-The Read Path focuses exclusively on low-latency analytical querying against the materialized read store:
+Following strict **CQRS / ES**, the **Query Model** focuses exclusively on read-only **Queries** and **Materialized Views** using **Apache DataFusion** as the query engine (Analytics and Agentic paths are deferred to a future version):
 
 ```mermaid
 flowchart TD
-    subgraph Client_Read ["Query Clients & Downstream Consumers"]
-        ClientApp["API Gateway / BI Tools / Analytical Clients<br/>• REST / Arrow Flight SQL Queries"]
+    subgraph Client_Read ["Query Client"]
+        ClientApp["API Client / Query Caller<br/>• Dispatches Read Queries (REST / Flight SQL)<br/>• Receives Projected Views"]
     end
 
-    subgraph Query_Engine_Tier ["Embedded Analytical Engine (In-Process)"]
-        DataFusion["Vectorized Query Runtime (Apache DataFusion)<br/>• In-process SessionContext<br/>• Vectorized SQL Execution (<3ms P95)<br/>• Arrow Flight SQL (:50051) & REST (:8085)"]
+    subgraph Query_Tier ["Query Model"]
+        QueryHandler["Query Handler<br/>• Routes Typed Queries to Query Engine<br/>• Shapes Projected View DTOs"]
     end
 
-    subgraph Storage_Tier ["Materialized Read Store (Lakehouse)"]
-        DeltaLake[("Delta Lake Table Store (/data/delta)<br/>• Materialized View Snapshots<br/>• Immutable Raw Event Audit Log<br/>• Historical Datasets (olist_*)")]
+    subgraph Query_Engine_Tier ["Query Engine (Apache DataFusion)"]
+        DataFusion["Apache DataFusion<br/>• In-process SessionContext<br/>• Vectorized SQL Execution (<3ms P95)<br/>• Delta TableProvider Catalog"]
     end
 
-    Client_Read -->|"1. Analytical Query (Flight SQL / REST)"| DataFusion
-    DataFusion -->|"2. Vectorized Parquet Scan (delta-rs log)"| DeltaLake
-    DataFusion -->|"3. Stream Arrow Batches / Query Result"| ClientApp
+    subgraph Storage_Tier ["Materialized View Store"]
+        DeltaLake[("Delta Lake (/data/delta)<br/>• orders_current_state (Current View)<br/>• orders_raw_events (Event View)")]
+    end
+
+    ClientApp -->|"1. Submit Query"| QueryHandler
+    QueryHandler -->|"2. Execute SQL Query"| DataFusion
+    DataFusion -->|"3. Scan Materialized View (delta-rs)"| DeltaLake
+    DeltaLake -->|"4. Arrow RecordBatches"| DataFusion
+    DataFusion -->|"5. Query Result"| QueryHandler
+    QueryHandler -->|"6. Return View DTO"| ClientApp
 ```
 
-* **Sub-3ms Analytical Querying:** Powered by **Apache DataFusion** and `delta-rs`. Queries against `orders_current_state` and `orders_raw_events` execute in sub-3ms P95 latency via vectorized scans over Parquet files, without intermediate database proxies or serialization overhead.
-* **Separation of Concerns:** The Read Model contains zero write-side stream processing, ingestion pipelines, or replayer plumbing, ensuring a clean decoupling between the command execution path and query engine retrieval.
+* **Pure Query & View Execution:** Powered by **Apache DataFusion** and `delta-rs`, queries against materialized Delta Lake views (`orders_current_state`, `orders_raw_events`) execute in sub-3ms P95 latency without touching SierraDB or replaying event logs.
+* **Separation of Concerns:** The Query Model is strictly side-effect free and decoupled from both write-side command/aggregate logic and future Analytics/Agentic workloads.
 
 ---
 
@@ -174,10 +179,9 @@ flowchart TD
 * **Deterministic Idempotency:** Translates callback messages into domain commands using deterministic `UUIDv5` command identifiers, discarding duplicate responses idempotently.
 * **SierraDB Atomic Commit & Rollback:** Validates aggregate invariants against `OrderAggregate` in SierraDB, atomically commits terminal settlement events (`CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`) via `EAPPEND`, and rolls back in-memory aggregate state if post-commit event publication fails.
 
-### 5. Vectorized Analytical Query Engine (Query-Side Service)
-* **Apache DataFusion Vectorized Engine:** Executes sub-3ms analytical SQL queries directly against Delta Lake transactional stores (`orders_current_state`, `orders_raw_events`) and historical tables (`olist_*`) via `delta-rs`.
-* **Arrow Flight SQL Endpoint (`50051`):** High-throughput binary Arrow streaming protocol for distributed query planners and business intelligence tools.
-* **REST & Telemetry API (`8085`):** Interactive SQL query endpoint (`/api/v1/query`), catalog introspection (`/api/v1/catalog/tables`), health checking (`/health`), and latency metrics.
+### 5. Canonical CQRS Query Contracts (`src/domain/order/queries.rs`)
+* **Typed Read Contracts:** Exports `GetOrderQuery` and `ListOrdersQuery` with pagination and input validation (`AD-32`).
+* **Embedded Execution in `ferrous-api`:** `ferrous-api` maps HTTP requests into these Query structs and executes them through its in-process `OrderQueryEngine` (in-memory test backend + embedded Apache DataFusion / `deltalake` runtime backend with `_delta_log` version-checked reloads, `AD-31`).
 
 ---
 
