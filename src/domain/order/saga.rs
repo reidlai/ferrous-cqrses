@@ -43,8 +43,8 @@ pub struct SagaConfig {
     #[arg(long, env = "STREAM_NAME", default_value = "orders")]
     pub stream_name: String,
 
-    /// Inbound domain events topic name
-    #[arg(long, env = "TOPIC_ORDERS_EVENTS", default_value = "events")]
+    /// Inbound committed domain events/snapshots topic name (`orders/consolidated`)
+    #[arg(long, env = "TOPIC_ORDERS_EVENTS", default_value = "consolidated")]
     pub topic_orders_events: String,
 
     /// Consumer group name for sequential saga processing
@@ -109,7 +109,7 @@ impl Default for SagaConfig {
             iggy_username: "iggy".to_string(),
             iggy_password: "iggy".to_string(),
             stream_name: "orders".to_string(),
-            topic_orders_events: "events".to_string(),
+            topic_orders_events: "consolidated".to_string(),
             consumer_group: "cg-order-saga".to_string(),
             enterprise_settlement_url:
                 "http://127.0.0.1:8080/api/v1/webhooks/orders/settlement-callback".to_string(),
@@ -519,7 +519,7 @@ impl SagaOutcome {
     }
 }
 
-/// Asynchronous Saga Process Manager consuming `DomainEvent` records from `orders/events`
+/// Asynchronous Saga Process Manager consuming committed `DomainEvent` records from `orders/consolidated`
 /// and orchestrating outbound settlement calls with external enterprise systems.
 pub struct OrderSagaManager<
     S: StreamConsumer = InMemoryStreamConsumer,

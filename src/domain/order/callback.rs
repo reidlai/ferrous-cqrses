@@ -1,15 +1,17 @@
-//! Asynchronous Callback Service for enterprise settlement workflows.
+//! Asynchronous Callback Service and Stream Consumer for enterprise settlement workflows.
 //!
-//! Provides the core [`CallbackService`] responsible for consuming settlement messages
-//! from Apache Iggy topic `orders/callbacks` (consumer group `cg-order-callback`), executing
-//! deterministic business invariant validation against `OrderAggregate` in SierraDB,
-//! atomically committing domain events (`CourtesyCreditSettled` or `CourtesyCreditSettlementFailed`)
-//! via `EAPPEND`, and publishing committed events to Apache Iggy (`orders/events`).
+//! Provides [`CallbackService`] and [`CallbackConsumer`] responsible for consuming settlement
+//! messages from Apache Iggy topic `orders/callback` (consumer group `cg-order-callback`),
+//! acting like [`CommandHandler`] to rehydrate `OrderAggregate` (`ESCAN`), evaluate business
+//! invariants, atomically commit domain events (`CourtesyCreditSettled` or
+//! `CourtesyCreditSettlementFailed`) via `EAPPEND` to SierraDB, and publish committed state
+//! to Apache Iggy (`orders/consolidated`).
 
 use std::sync::Arc;
+use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::commands::{
@@ -18,10 +20,14 @@ use super::commands::{
 use super::error::DomainError;
 use super::events::DomainEvent;
 use super::handler::CommandHandler;
+use crate::consumer::{InMemoryStreamConsumer, ReceivedMessage, StreamConsumer};
 use crate::publisher::StreamPublisher;
 
-/// Default Apache Iggy topic name for incoming callback responses.
-pub const CALLBACKS_TOPIC: &str = "callbacks";
+/// Canonical Apache Iggy topic name for incoming callback responses (`orders/callback`).
+pub const CALLBACK_TOPIC: &str = "callback";
+
+/// Backward-compatible alias for [`CALLBACK_TOPIC`].
+pub const CALLBACKS_TOPIC: &str = CALLBACK_TOPIC;
 
 /// Default Apache Iggy consumer group for the callback service.
 pub const CALLBACKS_CONSUMER_GROUP: &str = "cg-order-callback";
@@ -34,7 +40,7 @@ pub enum SettlementStatus {
     Failed,
 }
 
-/// Incoming message payload from the callback queue (`orders/callbacks`).
+/// Incoming message payload from the callback queue (`orders/callback`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementCallbackMessage {
     pub order_id: String,
@@ -198,7 +204,7 @@ impl CallbackService {
         Self {
             command_handler,
             publisher: None,
-            events_topic: "events".to_string(),
+            events_topic: "consolidated".to_string(),
             event_listener: None,
         }
     }
@@ -223,10 +229,15 @@ impl CallbackService {
         self
     }
 
-    /// Sets the destination topic for committed domain events (defaults to `"events"`).
+    /// Sets the destination topic for committed domain events (defaults to `"consolidated"`).
     pub fn with_events_topic(mut self, topic: impl Into<String>) -> Self {
         self.events_topic = topic.into();
         self
+    }
+
+    /// Explicit alias for [`with_events_topic`] targeting `orders/consolidated`.
+    pub fn with_consolidated_topic(self, topic: impl Into<String>) -> Self {
+        self.with_events_topic(topic)
     }
 
     /// Sets an optional event listener callback (e.g. for real-time SSE broadcast).
@@ -314,7 +325,7 @@ impl CallbackService {
             }
         };
 
-        // 2. Post-commit publication to streaming broker (e.g. orders/events)
+        // 2. Post-commit publication to streaming broker (e.g. orders/consolidated)
         if let Some(publisher) = &self.publisher {
             if let Err(err_msg) = publisher
                 .publish_domain_event(&self.events_topic, trimmed_order_id, &domain_event)
@@ -342,7 +353,8 @@ impl CallbackService {
             order_id = %trimmed_order_id,
             amount_cents = message.amount_cents,
             status = ?message.status,
-            "CallbackService successfully committed settlement domain event to SierraDB and published to events"
+            topic = %self.events_topic,
+            "CallbackService successfully committed settlement domain event to SierraDB and published to consolidated topic"
         );
 
         Ok(CallbackOutcome::Processed {
@@ -350,5 +362,187 @@ impl CallbackService {
             order_id: trimmed_order_id.to_string(),
             event_type: event_type.to_string(),
         })
+    }
+}
+
+/// Outcome of consuming a raw message from Apache Iggy topic `orders/callback`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackConsumerOutcome {
+    /// Callback validated against SierraDB aggregate, committed via `EAPPEND`, and offset acked.
+    Processed {
+        offset: u64,
+        partition_id: u32,
+        command_id: Uuid,
+        order_id: String,
+        event_type: String,
+    },
+    /// Duplicate callback idempotently ignored and offset acked.
+    DuplicateIgnored {
+        offset: u64,
+        partition_id: u32,
+        command_id: Uuid,
+        order_id: String,
+    },
+    /// Callback rejected due to invalid payload or domain invariant violation (offset acked).
+    Rejected {
+        offset: u64,
+        partition_id: u32,
+        error: String,
+    },
+}
+
+/// Stream consumer for Apache Iggy topic `orders/callback` (consumer group `cg-order-callback`).
+///
+/// Operates symmetrically to [`crate::consumer::CommandConsumer`]: polls inbound callback
+/// messages, delegates to [`CallbackService`] (which rehydrates `OrderAggregate` via `ESCAN`,
+/// evaluates domain invariants, and atomically commits via `EAPPEND` to SierraDB), publishes
+/// committed state to `orders/consolidated`, and acknowledges stream offsets.
+pub struct CallbackConsumer<S: StreamConsumer = InMemoryStreamConsumer> {
+    service: CallbackService,
+    stream: S,
+    outcomes: Vec<CallbackConsumerOutcome>,
+}
+
+impl<S: StreamConsumer> CallbackConsumer<S> {
+    /// Creates a new `CallbackConsumer` wrapping the given [`CallbackService`] and [`StreamConsumer`].
+    pub fn new(service: CallbackService, stream: S) -> Self {
+        Self {
+            service,
+            stream,
+            outcomes: Vec::new(),
+        }
+    }
+
+    pub fn service(&self) -> &CallbackService {
+        &self.service
+    }
+
+    pub fn stream(&self) -> &S {
+        &self.stream
+    }
+
+    pub fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    pub fn outcomes(&self) -> &[CallbackConsumerOutcome] {
+        &self.outcomes
+    }
+
+    /// Processes a single received message from `orders/callback`.
+    pub async fn process_message(
+        &mut self,
+        message: ReceivedMessage,
+    ) -> Result<CallbackConsumerOutcome, CallbackError> {
+        let offset = message.offset;
+        let partition_id = message.partition_id;
+
+        let outcome = match self.service.process_message(&message.payload).await {
+            Ok(CallbackOutcome::Processed {
+                command_id,
+                order_id,
+                event_type,
+            }) => {
+                self.stream
+                    .acknowledge(partition_id, offset)
+                    .await
+                    .map_err(CallbackError::Domain)?;
+                CallbackConsumerOutcome::Processed {
+                    offset,
+                    partition_id,
+                    command_id,
+                    order_id,
+                    event_type,
+                }
+            }
+            Ok(CallbackOutcome::DuplicateIgnored {
+                command_id,
+                order_id,
+            }) => {
+                self.stream
+                    .acknowledge(partition_id, offset)
+                    .await
+                    .map_err(CallbackError::Domain)?;
+                CallbackConsumerOutcome::DuplicateIgnored {
+                    offset,
+                    partition_id,
+                    command_id,
+                    order_id,
+                }
+            }
+            Err(CallbackError::Publisher(err)) => {
+                // Transient downstream publisher failure: do NOT acknowledge so broker redelivers
+                error!(
+                    partition_id = partition_id,
+                    offset = offset,
+                    error = %err,
+                    "CallbackConsumer publisher failure; leaving offset unacknowledged for redelivery"
+                );
+                return Err(CallbackError::Publisher(err));
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                warn!(
+                    partition_id = partition_id,
+                    offset = offset,
+                    error = %err_msg,
+                    "CallbackConsumer rejected invalid/invariant-violating message; acknowledging offset"
+                );
+                self.stream
+                    .acknowledge(partition_id, offset)
+                    .await
+                    .map_err(CallbackError::Domain)?;
+                CallbackConsumerOutcome::Rejected {
+                    offset,
+                    partition_id,
+                    error: err_msg,
+                }
+            }
+        };
+
+        if self.outcomes.len() >= 1000 {
+            self.outcomes.drain(0..100);
+        }
+        self.outcomes.push(outcome.clone());
+        Ok(outcome)
+    }
+
+    /// Polls and processes the next available message from `orders/callback`.
+    pub async fn process_next(&mut self) -> Result<Option<CallbackConsumerOutcome>, CallbackError> {
+        match self
+            .stream
+            .poll_message()
+            .await
+            .map_err(CallbackError::Domain)?
+        {
+            Some(msg) => Ok(Some(self.process_message(msg).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Runs the continuous callback consumption loop until `shutdown_rx` signals `true`.
+    pub async fn run_loop(
+        &mut self,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), CallbackError> {
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+            match self.process_next().await? {
+                Some(_) => {}
+                None => {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

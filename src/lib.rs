@@ -47,17 +47,17 @@ pub use consumer::{
 };
 pub use delta::{write_delta_table_snapshot, DeltaLogMetadata};
 pub use domain::order::{
-    validate_courtesy_credit_amount, CallbackError, CallbackOutcome, CallbackPublisher,
-    CallbackService, CancelOrderCommand, CommandHandler, ConsolidatedOrderProjection,
-    CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
-    CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher,
-    EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
+    validate_courtesy_credit_amount, CallbackConsumer, CallbackConsumerOutcome, CallbackError,
+    CallbackOutcome, CallbackPublisher, CallbackService, CancelOrderCommand, CommandHandler,
+    ConsolidatedOrderProjection, CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent,
+    CreateOrderCommand, CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent,
+    EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
     FailCourtesyCreditSettlementCommand, HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher,
     InvariantError, IssueCourtesyCreditCommand, MockEnterpriseDispatcher, OrderAggregate,
     OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager, OrderStatus,
     OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome, SettleCourtesyCreditCommand,
     SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
-    MAX_COURTESY_CREDIT_CENTS,
+    CALLBACK_TOPIC, MAX_COURTESY_CREDIT_CENTS,
 };
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use publisher::{
@@ -77,17 +77,18 @@ pub mod prelude {
     };
     pub use crate::delta::{write_delta_table_snapshot, DeltaLogMetadata};
     pub use crate::domain::order::{
-        validate_courtesy_credit_amount, CallbackError, CallbackOutcome, CallbackPublisher,
-        CallbackService, CancelOrderCommand, CommandHandler, ConsolidatedOrderProjection,
-        CourtesyCreditSettledEvent, CourtesyCreditSettlementFailedEvent, CreateOrderCommand,
-        CreditIssuedEvent, CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher,
-        EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
-        FailCourtesyCreditSettlementCommand, HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher,
-        InvariantError, IssueCourtesyCreditCommand, MockEnterpriseDispatcher, OrderAggregate,
-        OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager,
-        OrderStatus, OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome,
-        SettleCourtesyCreditCommand, SettlementCallbackMessage, SettlementStatus,
-        CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, MAX_COURTESY_CREDIT_CENTS,
+        validate_courtesy_credit_amount, CallbackConsumer, CallbackConsumerOutcome, CallbackError,
+        CallbackOutcome, CallbackPublisher, CallbackService, CancelOrderCommand, CommandHandler,
+        ConsolidatedOrderProjection, CourtesyCreditSettledEvent,
+        CourtesyCreditSettlementFailedEvent, CreateOrderCommand, CreditIssuedEvent,
+        CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher, EnterpriseResponse,
+        EnterpriseSettlementRequest, EventListener, FailCourtesyCreditSettlementCommand,
+        HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, InvariantError,
+        IssueCourtesyCreditCommand, MockEnterpriseDispatcher, OrderAggregate, OrderCancelledEvent,
+        OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager, OrderStatus,
+        OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome, SettleCourtesyCreditCommand,
+        SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
+        CALLBACK_TOPIC, MAX_COURTESY_CREDIT_CENTS,
     };
     pub use crate::id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
     pub use crate::publisher::{
