@@ -10,6 +10,7 @@ pub mod error;
 pub mod events;
 pub mod handler;
 pub mod projection;
+pub mod queries;
 pub mod saga;
 
 pub use aggregate::{
@@ -32,6 +33,9 @@ pub use events::{
 };
 pub use handler::CommandHandler;
 pub use projection::ConsolidatedOrderProjection;
+pub use queries::{
+    GetOrderQuery, ListOrdersQuery, DEFAULT_LIST_ORDERS_LIMIT, MAX_LIST_ORDERS_LIMIT,
+};
 pub use saga::{
     EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest,
     HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, MockEnterpriseDispatcher,
