@@ -125,7 +125,7 @@ fn test_order_saga_help_displays_options() {
 fn test_saga_config_defaults() {
     let config = SagaConfig::default();
     assert_eq!(config.stream_name, "orders");
-    assert_eq!(config.topic_orders_events, "events");
+    assert_eq!(config.topic_orders_events, "consolidated");
     assert_eq!(config.consumer_group, "cg-order-saga");
     assert_eq!(
         config.enterprise_settlement_url,

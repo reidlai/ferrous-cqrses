@@ -17,8 +17,9 @@ pub use aggregate::{
     MAX_COURTESY_CREDIT_CENTS,
 };
 pub use callback::{
-    CallbackError, CallbackOutcome, CallbackPublisher, CallbackService, EventListener,
-    SettlementCallbackMessage, SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC,
+    CallbackConsumer, CallbackConsumerOutcome, CallbackError, CallbackOutcome, CallbackPublisher,
+    CallbackService, EventListener, SettlementCallbackMessage, SettlementStatus,
+    CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, CALLBACK_TOPIC,
 };
 pub use commands::{
     CancelOrderCommand, CreateOrderCommand, FailCourtesyCreditSettlementCommand,

@@ -48,15 +48,19 @@ pub struct Config {
     #[arg(long, env = "STREAM_NAME", default_value = "orders")]
     pub stream_name: String,
 
-    /// Inbound command intake topic name
+    /// Direct stream-replay-rs ingestion topic name (`orders/intake`)
     #[arg(long, env = "TOPIC_ORDERS_INTAKE", default_value = "intake")]
     pub topic_orders_intake: String,
 
-    /// Inbound domain events topic name
-    #[arg(long, env = "TOPIC_ORDERS_EVENTS", default_value = "events")]
+    /// Inbound callback queue topic name (`orders/callback`)
+    #[arg(long, env = "TOPIC_ORDERS_CALLBACK", default_value = "callback")]
+    pub topic_orders_callback: String,
+
+    /// Committed domain events/snapshots topic name (`orders/consolidated`)
+    #[arg(long, env = "TOPIC_ORDERS_EVENTS", default_value = "consolidated")]
     pub topic_orders_events: String,
 
-    /// Target consolidated order projections topic name
+    /// Target consolidated order projections topic name (`orders/consolidated`)
     #[arg(
         long,
         env = "TOPIC_ORDERS_CONSOLIDATED",
@@ -85,7 +89,8 @@ impl Default for Config {
             iggy_password: "iggy".to_string(),
             stream_name: "orders".to_string(),
             topic_orders_intake: "intake".to_string(),
-            topic_orders_events: "events".to_string(),
+            topic_orders_callback: "callback".to_string(),
+            topic_orders_events: "consolidated".to_string(),
             topic_orders_consolidated: "consolidated".to_string(),
             consumer_group: "cg-cmd-handler".to_string(),
             sierradb_url: "127.0.0.1:9090".to_string(),
@@ -645,9 +650,9 @@ impl ProjectionOutcome {
     }
 }
 
-/// Dedicated order projection consumer consuming `DomainEvent` records from `orders/events`,
-/// reconstructing/updating [`OrderAggregate`] state snapshots, and publishing
-/// [`ConsolidatedOrderProjection`] snapshots to `orders/consolidated`.
+/// Dedicated order projection consumer consuming committed events from `orders/consolidated`,
+/// reconstructing/updating [`OrderAggregate`] state snapshots, persisting snapshots to Delta Lake
+/// via `delta-rs`, and publishing callbacks to `orders/callback`.
 pub struct ProjectionConsumer<
     S: StreamConsumer = InMemoryStreamConsumer,
     P: StreamPublisher = InMemoryStreamPublisher,
@@ -657,6 +662,7 @@ pub struct ProjectionConsumer<
     aggregates: HashMap<String, OrderAggregate>,
     stream: S,
     publisher: P,
+    delta_table_dir: Option<std::path::PathBuf>,
     outcomes: Vec<ProjectionOutcome>,
 }
 
@@ -669,6 +675,7 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             aggregates: HashMap::new(),
             stream,
             publisher,
+            delta_table_dir: None,
             outcomes: Vec::new(),
         }
     }
@@ -686,8 +693,15 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             aggregates: HashMap::new(),
             stream,
             publisher,
+            delta_table_dir: None,
             outcomes: Vec::new(),
         }
+    }
+
+    /// Configures a Delta Lake table directory for persisting materialized snapshots via `delta-rs`.
+    pub fn with_delta_table_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.delta_table_dir = Some(dir.into());
+        self
     }
 
     pub fn config(&self) -> &Config {
@@ -794,20 +808,24 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             aggregate.apply(&event)?;
         }
 
-        // 3. Construct ConsolidatedOrderProjection snapshot
+        // 3. Construct ConsolidatedOrderProjection snapshot & commit to Delta Lake if configured
         let projection = ConsolidatedOrderProjection::from_aggregate(
             &aggregate,
             credit_delta,
             event.timestamp(),
         );
+        if let Some(ref table_dir) = self.delta_table_dir {
+            crate::delta::write_delta_table_snapshot(table_dir, std::slice::from_ref(&projection))
+                .map_err(|e| DomainError::Generic(format!("Delta Lake snapshot write failed: {e}")))?;
+        }
         let payload = projection.to_json_bytes()?;
 
-        // 4. Bounded retry publishing to topic_orders_consolidated
+        // 4. Bounded retry publishing to topic_orders_callback (orders/callback)
         let mut attempts = 0;
         let published_offset = loop {
             match self
                 .publisher
-                .publish(&self.config.topic_orders_consolidated, &order_id, &payload)
+                .publish(&self.config.topic_orders_callback, &order_id, &payload)
                 .await
             {
                 Ok(off) => break off,
@@ -828,11 +846,11 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
         info!(
             partition_id = partition_id,
             order_id = %order_id,
-            topic = %self.config.topic_orders_consolidated,
+            topic = %self.config.topic_orders_callback,
             offset = published_offset,
             credit_issued = aggregate.courtesy_credit_cents,
             credit_delta = credit_delta,
-            "Published consolidated order projection snapshot from domain event"
+            "Committed projection snapshot and published to orders/callback"
         );
 
         // 5. Update cached aggregate and acknowledge offset

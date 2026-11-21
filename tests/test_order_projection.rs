@@ -1,9 +1,9 @@
 //! Integration tests for `order_projection` binary and `ProjectionConsumer`.
 //!
-//! Validates Story 17.4 Topology A read-side projection generation:
-//! - Consuming `DomainEvent` (`CreditIssuedEvent`, `OrderCreatedEvent`, `OrderCancelledEvent`) from `orders/events`
+//! Validates Topology A projection generation:
+//! - Consuming committed `DomainEvent` (`CreditIssuedEvent`, `OrderCreatedEvent`, `OrderCancelledEvent`) from `orders/consolidated`
 //! - Reconstructing/updating `OrderAggregate`
-//! - Emitting `ConsolidatedOrderProjection` snapshot to `orders/consolidated`
+//! - Committing `ConsolidatedOrderProjection` snapshot to Delta Lake (`delta-rs`) and publishing to `orders/callback`
 //! - Healthcheck probe and resilience to malformed payloads
 
 use chrono::Utc;
@@ -97,11 +97,11 @@ async fn test_projection_consumer_transforms_credit_issued_to_consolidated_snaps
         other => panic!("Expected ProjectionOutcome::Success, got: {other:?}"),
     }
 
-    // 4. Verify ConsolidatedOrderProjection was published to topic_orders_consolidated
+    // 4. Verify ConsolidatedOrderProjection was published to topic_orders_callback
     let published = consumer.publisher().published();
     assert_eq!(published.len(), 1);
     let pub_msg = &published[0];
-    assert_eq!(pub_msg.topic, config.topic_orders_consolidated);
+    assert_eq!(pub_msg.topic, config.topic_orders_callback);
     assert_eq!(pub_msg.partition_key, order_id);
 
     let projection: ConsolidatedOrderProjection = serde_json::from_slice(&pub_msg.payload).unwrap();

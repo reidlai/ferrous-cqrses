@@ -69,7 +69,7 @@ async fn test_successful_settlement_callback() {
 
     let service = CallbackService::new(handler.clone())
         .with_stream_publisher(publisher.clone())
-        .with_events_topic("orders/events");
+        .with_consolidated_topic("orders/consolidated");
 
     let message = SettlementCallbackMessage {
         order_id: order_id.clone(),
@@ -107,7 +107,7 @@ async fn test_successful_settlement_callback() {
         let pub_guard = publisher.lock().await;
         let published = pub_guard.published();
         assert_eq!(published.len(), 1);
-        assert_eq!(published[0].topic, "orders/events");
+        assert_eq!(published[0].topic, "orders/consolidated");
         assert_eq!(published[0].partition_key, order_id);
 
         let event: DomainEvent = serde_json::from_slice(&published[0].payload).unwrap();
@@ -130,7 +130,7 @@ async fn test_successful_failed_settlement_callback() {
 
     let service = CallbackService::new(handler.clone())
         .with_stream_publisher(publisher.clone())
-        .with_events_topic("orders/events");
+        .with_consolidated_topic("orders/consolidated");
 
     let message = SettlementCallbackMessage {
         order_id: order_id.clone(),
@@ -533,4 +533,94 @@ async fn test_publisher_failure_rollback() {
         assert_eq!(agg.settled_credit_cents, 0);
         assert_eq!(agg.version, 2);
     }
+}
+
+#[tokio::test]
+async fn test_callback_consumer_rehydrates_validates_and_appends_to_event_store() {
+    use ferrous_cqrses::{
+        callback::{CallbackConsumer, CallbackConsumerOutcome, CALLBACK_TOPIC},
+        consumer::{InMemoryStreamConsumer, ReceivedMessage},
+        sierra::{stream_id_for_order, EventStore},
+    };
+
+    assert_eq!(CALLBACK_TOPIC, "callback");
+
+    let order_id = Uuid::now_v7().to_string();
+    let store = Arc::new(InMemoryEventStore::new());
+
+    // 1. Seed initial OrderCreated + CreditIssued events into EventStore using a separate CommandHandler
+    {
+        let mut seed_handler = CommandHandler::new_with_store(store.clone());
+        seed_handler
+            .handle_command(OrderCommand::CreateOrder(CreateOrderCommand::new(
+                &order_id,
+                "cust-consumer-1",
+                5000,
+                chrono::Utc::now(),
+            )))
+            .await
+            .unwrap();
+        seed_handler
+            .handle_command(OrderCommand::IssueCourtesyCredit(
+                IssueCourtesyCreditCommand::new(&order_id, 1200, "Late delivery"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    // 2. Construct a cold CommandHandler backed by the same EventStore (forces ESCAN rehydration)
+    let cold_handler = Arc::new(Mutex::new(CommandHandler::new_with_store(store.clone())));
+    let publisher = Arc::new(Mutex::new(InMemoryStreamPublisher::new()));
+    let service = CallbackService::new(cold_handler.clone())
+        .with_stream_publisher(publisher.clone())
+        .with_consolidated_topic("orders/consolidated");
+
+    let callback_payload = serde_json::to_vec(&SettlementCallbackMessage {
+        order_id: order_id.clone(),
+        amount_cents: 1200,
+        status: SettlementStatus::Settled,
+        transaction_ref: Some("tx-consumer-999".to_string()),
+        reason: None,
+    })
+    .unwrap();
+
+    let stream = InMemoryStreamConsumer::from_messages(vec![ReceivedMessage::new(
+        0,
+        0,
+        callback_payload,
+    )]);
+
+    let mut consumer = CallbackConsumer::new(service, stream);
+
+    // 3. Consume from orders/callback -> ESCAN rehydrate -> invariant check -> EAPPEND -> publish orders/consolidated -> ack
+    let outcome = consumer.process_next().await.unwrap().unwrap();
+    match outcome {
+        CallbackConsumerOutcome::Processed {
+            offset,
+            partition_id,
+            order_id: ref oid,
+            ref event_type,
+            ..
+        } => {
+            assert_eq!(offset, 0);
+            assert_eq!(partition_id, 0);
+            assert_eq!(oid, &order_id);
+            assert_eq!(event_type, "CourtesyCreditSettled");
+        }
+        other => panic!("Expected CallbackConsumerOutcome::Processed, got {other:?}"),
+    }
+
+    // 4. Verify EventStore received EAPPEND (3 events total: Created, CreditIssued, CourtesyCreditSettled)
+    let stream_events = store.scan(&stream_id_for_order(&order_id)).await.unwrap();
+    assert_eq!(stream_events.len(), 3);
+    assert!(matches!(
+        stream_events[2],
+        DomainEvent::CourtesyCreditSettled(_)
+    ));
+
+    // 5. Verify offset was acknowledged and committed event was published to orders/consolidated
+    assert_eq!(consumer.stream().acknowledged(), &[(0, 0)]);
+    let pub_guard = publisher.lock().await;
+    assert_eq!(pub_guard.published().len(), 1);
+    assert_eq!(pub_guard.published()[0].topic, "orders/consolidated");
 }
