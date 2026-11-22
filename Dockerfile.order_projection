@@ -8,10 +8,11 @@ RUN apk add --no-cache musl-dev gcc make ca-certificates
 
 WORKDIR /usr/src/ferrous-cqrses
 
-# Create unprivileged user / group files and empty secure tmpfs mount point for scratch runtime
+# Create unprivileged user / group files and empty secure tmpfs/delta mount points for scratch runtime
 RUN echo "cqrses:x:10001:10001:FerrousCQRS Daemon:/nonexistent:/sbin/nologin" > /etc/passwd.scratch && \
     echo "cqrses:x:10001:" > /etc/group.scratch && \
-    mkdir -m 1777 /tmp_scratch
+    mkdir -m 1777 /tmp_scratch && \
+    mkdir -p /data_delta_scratch
 
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
@@ -31,6 +32,7 @@ COPY --from=builder /etc/passwd.scratch /etc/passwd
 COPY --from=builder /etc/group.scratch /etc/group
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /tmp_scratch /tmp
+COPY --from=builder --chown=10001:10001 /data_delta_scratch /data/delta
 COPY --from=builder /usr/src/ferrous-cqrses/target/x86_64-unknown-linux-musl/release/order_projection /order_projection
 
 USER 10001:10001
