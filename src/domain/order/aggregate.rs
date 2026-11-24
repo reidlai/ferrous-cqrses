@@ -21,16 +21,20 @@ pub enum CreditSettlementStatus {
     SettlementFailed,
 }
 
-/// Order lifecycle operational statuses.
+/// Order lifecycle operational statuses aligned with canonical Kaggle Olist vocabulary (AD-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
     #[default]
     Created,
+    Approved,
+    Invoiced,
     Processing,
     InTransit,
     Shipped,
     Delivered,
+    Unavailable,
+    #[serde(rename = "canceled", alias = "cancelled")]
     Cancelled,
     FraudLocked,
 }
@@ -38,13 +42,33 @@ pub enum OrderStatus {
 impl OrderStatus {
     /// Returns true if this order status permits further state mutations.
     pub fn is_modifiable(&self) -> bool {
-        !matches!(self, Self::Cancelled | Self::FraudLocked)
+        !matches!(self, Self::Cancelled | Self::FraudLocked | Self::Unavailable)
     }
 
     /// Returns true if concession credits can be issued in this state.
     pub fn can_issue_credit(&self) -> bool {
         self.is_modifiable()
     }
+
+    /// Returns the canonical lowercase Olist status string.
+    pub fn as_olist_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Approved => "approved",
+            Self::Invoiced => "invoiced",
+            Self::Processing => "processing",
+            Self::InTransit => "in_transit",
+            Self::Shipped => "shipped",
+            Self::Delivered => "delivered",
+            Self::Unavailable => "unavailable",
+            Self::Cancelled => "canceled",
+            Self::FraudLocked => "fraud_locked",
+        }
+    }
+}
+
+fn default_epoch() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH
 }
 
 /// Core domain aggregate representing an e-commerce order with event-sourced rehydration.
@@ -53,10 +77,18 @@ pub struct OrderAggregate {
     pub order_id: String,
     pub customer_id: String,
     pub status: OrderStatus,
+    #[serde(default)]
+    pub total_amount_cents: i64,
     pub total_freight_cents: i64,
     pub courtesy_credit_cents: i64,
     pub settled_credit_cents: i64,
     pub settlement_status: CreditSettlementStatus,
+    #[serde(default = "default_epoch")]
+    pub order_purchase_timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub order_approved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub order_delivered_carrier_date: Option<DateTime<Utc>>,
     pub delivery_sla: DateTime<Utc>,
     pub actual_delivery: Option<DateTime<Utc>>,
     pub version: u64,
@@ -68,10 +100,14 @@ impl Default for OrderAggregate {
             order_id: String::new(),
             customer_id: String::new(),
             status: OrderStatus::Created,
+            total_amount_cents: 0,
             total_freight_cents: 0,
             courtesy_credit_cents: 0,
             settled_credit_cents: 0,
             settlement_status: CreditSettlementStatus::None,
+            order_purchase_timestamp: DateTime::UNIX_EPOCH,
+            order_approved_at: None,
+            order_delivered_carrier_date: None,
             delivery_sla: DateTime::UNIX_EPOCH,
             actual_delivery: None,
             version: 0,
@@ -91,10 +127,14 @@ impl OrderAggregate {
             order_id: order_id.into(),
             customer_id: customer_id.into(),
             status: OrderStatus::Created,
+            total_amount_cents: 0,
             total_freight_cents,
             courtesy_credit_cents: 0,
             settled_credit_cents: 0,
             settlement_status: CreditSettlementStatus::None,
+            order_purchase_timestamp: Utc::now(),
+            order_approved_at: None,
+            order_delivered_carrier_date: None,
             delivery_sla,
             actual_delivery: None,
             version: 0,
@@ -208,6 +248,7 @@ impl OrderAggregate {
                 self.order_id = e.order_id.clone();
                 self.customer_id = e.customer_id.clone();
                 self.total_freight_cents = e.total_freight_cents;
+                self.order_purchase_timestamp = e.created_at;
                 self.delivery_sla = e.delivery_sla;
                 self.status = OrderStatus::Created;
                 self.version = e.version;
@@ -229,8 +270,11 @@ impl OrderAggregate {
                     return Err(DomainError::InvalidOrderStatus(self.status));
                 }
                 self.status = e.new_status;
-                if e.new_status == OrderStatus::Delivered {
-                    self.actual_delivery = Some(e.updated_at);
+                match e.new_status {
+                    OrderStatus::Approved => self.order_approved_at = Some(e.updated_at),
+                    OrderStatus::Shipped => self.order_delivered_carrier_date = Some(e.updated_at),
+                    OrderStatus::Delivered => self.actual_delivery = Some(e.updated_at),
+                    _ => {}
                 }
                 self.version = e.version;
                 Ok(())

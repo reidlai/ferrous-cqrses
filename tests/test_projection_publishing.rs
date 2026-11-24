@@ -67,25 +67,30 @@ async fn test_credit_concession_projection_published_exact_fields() {
 
     assert_eq!(projection.order_id, order_id);
     assert_eq!(projection.customer_id, customer_id);
-    assert_eq!(projection.status, OrderStatus::Created);
+    assert_eq!(projection.order_status, OrderStatus::Created);
+    assert_eq!(projection.total_amount_cents, 0);
     assert_eq!(projection.total_freight_cents, 2500);
     assert_eq!(projection.courtesy_credit_cents, 750);
-    assert_eq!(projection.credit_issued, 750);
+    assert_eq!(projection.credit_delta, 750);
     assert_eq!(projection.version, 2);
 
-    // Generic JSON serde_json::Value field inspection
+    // Generic JSON serde_json::Value field inspection (canonical AD-34 olist_orders base + overlay)
     let val: Value =
         serde_json::from_slice(&credit_msg.payload).expect("Must parse generic JSON Value");
     assert_eq!(val["order_id"].as_str().unwrap(), order_id);
     assert_eq!(val["customer_id"].as_str().unwrap(), customer_id);
-    assert_eq!(val["status"].as_str().unwrap(), "created");
+    assert_eq!(val["order_status"].as_str().unwrap(), "created");
+    assert!(val["order_purchase_timestamp"].is_string());
+    assert!(val["order_approved_at"].is_null());
+    assert!(val["order_delivered_carrier_date"].is_null());
+    assert!(val["order_delivered_customer_date"].is_null());
+    assert!(val["order_estimated_delivery_date"].is_string());
+    assert_eq!(val["total_amount_cents"].as_i64().unwrap(), 0);
     assert_eq!(val["total_freight_cents"].as_i64().unwrap(), 2500);
     assert_eq!(val["courtesy_credit_cents"].as_i64().unwrap(), 750);
-    assert_eq!(val["credit_issued"].as_i64().unwrap(), 750);
+    assert_eq!(val["credit_delta"].as_i64().unwrap(), 750);
     assert_eq!(val["version"].as_u64().unwrap(), 2);
-    assert!(val["delivery_sla"].is_string());
     assert!(val["updated_at"].is_string());
-    assert!(val["actual_delivery"].is_null());
 }
 
 #[tokio::test]
@@ -118,12 +123,11 @@ async fn test_order_creation_projection_publishing() {
     let proj: ConsolidatedOrderProjection = serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!(proj.order_id, order_id);
     assert_eq!(proj.customer_id, customer_id);
-    assert_eq!(proj.status, OrderStatus::Created);
+    assert_eq!(proj.order_status, OrderStatus::Created);
     assert_eq!(proj.total_freight_cents, 1850);
     assert_eq!(proj.courtesy_credit_cents, 0);
-    assert_eq!(proj.credit_issued, 0);
     assert_eq!(proj.version, 1);
-    assert_eq!(proj.actual_delivery, None);
+    assert_eq!(proj.order_delivered_customer_date, None);
 }
 
 #[tokio::test]
@@ -162,9 +166,13 @@ async fn test_order_cancellation_projection_publishing() {
 
     let proj: ConsolidatedOrderProjection = serde_json::from_slice(&cancel_msg.payload).unwrap();
     assert_eq!(proj.order_id, order_id);
-    assert_eq!(proj.status, OrderStatus::Cancelled);
-    assert_eq!(proj.credit_issued, 0);
+    assert_eq!(proj.order_status, OrderStatus::Cancelled);
+    assert_eq!(proj.courtesy_credit_cents, 0);
     assert_eq!(proj.version, 2);
+
+    // Verify canonical Olist US-spelling "canceled" on the wire (AD-34)
+    let cancel_val: Value = serde_json::from_slice(&cancel_msg.payload).unwrap();
+    assert_eq!(cancel_val["order_status"].as_str().unwrap(), "canceled");
 }
 
 #[tokio::test]
@@ -308,7 +316,6 @@ async fn test_projection_json_roundtrip_and_serialization() {
     assert_eq!(proj.customer_id, "CUST-RT-01");
     assert_eq!(proj.total_freight_cents, 3450);
     assert_eq!(proj.courtesy_credit_cents, 0);
-    assert_eq!(proj.credit_issued, 0);
     assert_eq!(proj.credit_delta, 500);
     assert_eq!(proj.version, 0);
 
@@ -317,7 +324,7 @@ async fn test_projection_json_roundtrip_and_serialization() {
         serde_json::from_slice(&json_bytes).expect("Deserialization must succeed");
 
     assert_eq!(proj, deserialized);
-    assert_eq!(deserialized.credit_issued, 0);
+    assert_eq!(deserialized.courtesy_credit_cents, 0);
     assert_eq!(deserialized.credit_delta, 500);
 }
 
@@ -425,29 +432,25 @@ async fn test_consecutive_credits_cumulative_vs_delta() {
     // Verify Projection 1 (Create)
     let p1: ConsolidatedOrderProjection = serde_json::from_slice(&published[0].payload).unwrap();
     assert_eq!(p1.version, 1);
-    assert_eq!(p1.credit_issued, 0);
     assert_eq!(p1.courtesy_credit_cents, 0);
     assert_eq!(p1.credit_delta, 0);
 
     // Verify Projection 2 (Credit 1: 500c)
     let p2: ConsolidatedOrderProjection = serde_json::from_slice(&published[1].payload).unwrap();
     assert_eq!(p2.version, 2);
-    assert_eq!(p2.credit_issued, 500);
     assert_eq!(p2.courtesy_credit_cents, 500);
     assert_eq!(p2.credit_delta, 500);
 
     // Verify Projection 3 (Credit 2: 300c -> Cumulative 800c)
     let p3: ConsolidatedOrderProjection = serde_json::from_slice(&published[2].payload).unwrap();
     assert_eq!(p3.version, 3);
-    assert_eq!(p3.credit_issued, 800);
     assert_eq!(p3.courtesy_credit_cents, 800);
     assert_eq!(p3.credit_delta, 300);
 
-    // Verify Projection 4 (Cancel: credit_issued preserves 800c cumulative concession!)
+    // Verify Projection 4 (Cancel: courtesy_credit_cents preserves 800c cumulative concession!)
     let p4: ConsolidatedOrderProjection = serde_json::from_slice(&published[3].payload).unwrap();
     assert_eq!(p4.version, 4);
-    assert_eq!(p4.status, OrderStatus::Cancelled);
-    assert_eq!(p4.credit_issued, 800);
+    assert_eq!(p4.order_status, OrderStatus::Cancelled);
     assert_eq!(p4.courtesy_credit_cents, 800);
     assert_eq!(p4.credit_delta, 0);
 }
@@ -655,16 +658,15 @@ async fn test_minimal_five_field_schema_compatibility() {
     }"#;
 
     let proj: ConsolidatedOrderProjection =
-        serde_json::from_str(raw_json).expect("Must parse minimal 5-field JSON");
+        serde_json::from_str(raw_json).expect("Must parse minimal 5-field legacy JSON via aliases");
     assert_eq!(proj.order_id, "ORD-MIN-001");
-    assert_eq!(proj.status, OrderStatus::Created);
-    assert_eq!(proj.credit_issued, 250);
+    assert_eq!(proj.order_status, OrderStatus::Created);
+    assert_eq!(proj.courtesy_credit_cents, 250);
     assert_eq!(proj.version, 1);
-    assert_eq!(proj.courtesy_credit_cents, 0);
     assert_eq!(proj.credit_delta, 0);
     assert_eq!(proj.customer_id, "");
     assert_eq!(proj.total_freight_cents, 0);
-    assert_eq!(proj.actual_delivery, None);
+    assert_eq!(proj.order_delivered_customer_date, None);
 }
 
 #[tokio::test]
@@ -674,9 +676,36 @@ async fn test_actual_delivery_some_projection_serialization() {
     agg.actual_delivery = Some(now);
 
     let proj = ConsolidatedOrderProjection::from_aggregate(&agg, 0, now);
-    assert_eq!(proj.actual_delivery, Some(now));
+    assert_eq!(proj.order_delivered_customer_date, Some(now));
 
     let bytes = proj.to_json_bytes().unwrap();
     let deserialized: ConsolidatedOrderProjection = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(deserialized.actual_delivery, Some(now));
+    assert_eq!(deserialized.order_delivered_customer_date, Some(now));
+}
+
+#[tokio::test]
+async fn test_olist_csv_row_promotes_to_canonical_projection() {
+    let raw_olist_json = r#"{
+        "order_id": "e481f51cbdc54678b7cc49136f2d6af7",
+        "customer_id": "9ef432eb6251297304e76186b10a928d",
+        "order_status": "delivered",
+        "order_purchase_timestamp": "2017-10-02T10:56:33Z",
+        "order_approved_at": "2017-10-02T11:07:15Z",
+        "order_delivered_carrier_date": "2017-10-04T19:55:00Z",
+        "order_delivered_customer_date": "2017-10-10T21:25:13Z",
+        "order_estimated_delivery_date": "2017-10-18T00:00:00Z"
+    }"#;
+
+    let olist: OlistOrderRecord = serde_json::from_str(raw_olist_json)
+        .expect("Must parse Kaggle olist_orders JSON directly");
+    assert_eq!(olist.order_status, OrderStatus::Delivered);
+    assert!(olist.order_approved_at.is_some());
+    assert!(olist.order_delivered_carrier_date.is_some());
+    assert!(olist.order_delivered_customer_date.is_some());
+
+    let proj = ConsolidatedOrderProjection::from_olist_order(olist);
+    assert_eq!(proj.order_id, "e481f51cbdc54678b7cc49136f2d6af7");
+    assert_eq!(proj.order_status, OrderStatus::Delivered);
+    assert_eq!(proj.courtesy_credit_cents, 0);
+    assert_eq!(proj.version, 0);
 }

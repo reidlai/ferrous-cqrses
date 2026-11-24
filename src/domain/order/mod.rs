@@ -32,7 +32,7 @@ pub use events::{
     OrderCancelledEvent, OrderCreatedEvent, OrderEvent, OrderStatusUpdatedEvent,
 };
 pub use handler::CommandHandler;
-pub use projection::ConsolidatedOrderProjection;
+pub use projection::{ConsolidatedOrderProjection, OlistOrderRecord};
 pub use queries::{
     GetOrderQuery, ListOrdersQuery, DEFAULT_LIST_ORDERS_LIMIT, MAX_LIST_ORDERS_LIMIT,
 };

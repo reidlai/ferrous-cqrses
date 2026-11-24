@@ -107,9 +107,8 @@ async fn test_projection_consumer_transforms_credit_issued_to_consolidated_snaps
     let projection: ConsolidatedOrderProjection = serde_json::from_slice(&pub_msg.payload).unwrap();
     assert_eq!(projection.order_id, order_id);
     assert_eq!(projection.customer_id, "cust-123");
-    assert_eq!(projection.status, OrderStatus::Created);
+    assert_eq!(projection.order_status, OrderStatus::Created);
     assert_eq!(projection.courtesy_credit_cents, 1200);
-    assert_eq!(projection.credit_issued, 1200);
     assert_eq!(projection.credit_delta, 1200);
 
     // 5. Verify offset was acknowledged
