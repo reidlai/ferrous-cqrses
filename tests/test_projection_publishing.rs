@@ -709,3 +709,61 @@ async fn test_olist_csv_row_promotes_to_canonical_projection() {
     assert_eq!(proj.courtesy_credit_cents, 0);
     assert_eq!(proj.version, 0);
 }
+
+#[tokio::test]
+async fn test_story_22_3_order_items_and_payments_enrich_aggregate_and_projection() {
+    let config = Config::default();
+    let stream = InMemoryStreamConsumer::new();
+    let publisher = InMemoryStreamPublisher::new();
+    let mut consumer = CommandConsumer::new(config, stream, publisher);
+
+    let now = Utc::now();
+    let items = vec![
+        OrderItemValue {
+            order_item_id: 1,
+            product_id: "prod-olist-1".to_string(),
+            seller_id: "seller-sp-1".to_string(),
+            shipping_limit_date: Some(now),
+            price_cents: 5990,
+            freight_cents: 1250,
+        },
+        OrderItemValue {
+            order_item_id: 2,
+            product_id: "prod-olist-2".to_string(),
+            seller_id: "seller-sp-1".to_string(),
+            shipping_limit_date: Some(now),
+            price_cents: 4010,
+            freight_cents: 750,
+        },
+    ];
+    let payments = vec![OrderPaymentValue {
+        payment_sequential: 1,
+        payment_type: "credit_card".to_string(),
+        payment_installments: 3,
+        payment_value_cents: 12000,
+    }];
+
+    let create_cmd = OrderCommand::CreateOrder(
+        CreateOrderCommand::new("ORD-AD35-001", "CUST-AD35", 0, now)
+            .with_items(items.clone())
+            .with_payments(payments.clone()),
+    );
+    consumer
+        .process_message(ReceivedMessage::from_command(0, 0, &create_cmd).unwrap())
+        .await
+        .unwrap();
+
+    let agg = consumer.handler().get_aggregate("ORD-AD35-001").unwrap();
+    assert_eq!(agg.total_amount_cents, 10000);
+    assert_eq!(agg.total_freight_cents, 2000);
+    assert_eq!(agg.total_payment_cents(), 12000);
+    assert_eq!(agg.primary_payment_type(), Some("credit_card"));
+
+    let published = consumer.publisher().published();
+    assert_eq!(published.len(), 1);
+    let proj: ConsolidatedOrderProjection = serde_json::from_slice(&published[0].payload).unwrap();
+    assert_eq!(proj.total_amount_cents, 10000);
+    assert_eq!(proj.total_freight_cents, 2000);
+    assert_eq!(proj.items, items);
+    assert_eq!(proj.payments, payments);
+}

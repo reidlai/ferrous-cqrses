@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::aggregate::{OrderAggregate, OrderStatus};
+use super::aggregate::{OrderAggregate, OrderItemValue, OrderPaymentValue, OrderStatus};
 use super::error::DomainError;
 
 fn default_timestamp() -> DateTime<Utc> {
@@ -70,6 +70,12 @@ pub struct ConsolidatedOrderProjection {
     pub version: u64,
     #[serde(default = "default_timestamp")]
     pub updated_at: DateTime<Utc>,
+
+    // --- Optional AD-35 Olist item & payment value objects ---
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<OrderItemValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payments: Vec<OrderPaymentValue>,
 }
 
 impl ConsolidatedOrderProjection {
@@ -101,6 +107,8 @@ impl ConsolidatedOrderProjection {
             credit_delta,
             version: agg.version,
             updated_at,
+            items: agg.items.clone(),
+            payments: agg.payments.clone(),
         }
     }
 
@@ -123,6 +131,8 @@ impl ConsolidatedOrderProjection {
             credit_delta: 0,
             version: 0,
             updated_at,
+            items: Vec::new(),
+            payments: Vec::new(),
         }
     }
 

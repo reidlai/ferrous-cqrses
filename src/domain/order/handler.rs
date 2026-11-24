@@ -168,7 +168,8 @@ impl CommandHandler {
             &cmd.customer_id,
             cmd.total_freight_cents,
             cmd.delivery_sla,
-        );
+        )
+        .with_items_and_payments(cmd.items.clone(), cmd.payments.clone());
         let domain_event = DomainEvent::OrderCreated(event);
 
         aggregate.apply(&domain_event)?;

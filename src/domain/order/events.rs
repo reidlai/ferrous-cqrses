@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::aggregate::OrderStatus;
+use crate::aggregate::{OrderItemValue, OrderPaymentValue, OrderStatus};
 use crate::id::generate_uuidv7;
 
 /// Event emitted when a courtesy credit concession is granted to an order.
@@ -74,6 +74,10 @@ pub struct OrderCreatedEvent {
     pub customer_id: String,
     pub total_freight_cents: i64,
     pub delivery_sla: DateTime<Utc>,
+    #[serde(default)]
+    pub items: Vec<OrderItemValue>,
+    #[serde(default)]
+    pub payments: Vec<OrderPaymentValue>,
     pub created_at: DateTime<Utc>,
     pub version: u64,
 }
@@ -91,9 +95,21 @@ impl OrderCreatedEvent {
             customer_id: customer_id.into(),
             total_freight_cents,
             delivery_sla,
+            items: Vec::new(),
+            payments: Vec::new(),
             created_at: Utc::now(),
             version: 1,
         }
+    }
+
+    pub fn with_items_and_payments(
+        mut self,
+        items: Vec<OrderItemValue>,
+        payments: Vec<OrderPaymentValue>,
+    ) -> Self {
+        self.items = items;
+        self.payments = payments;
+        self
     }
 }
 
