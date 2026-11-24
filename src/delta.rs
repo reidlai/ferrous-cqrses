@@ -25,6 +25,10 @@ pub struct DeltaLogMetadata {
     pub commit_files_count: usize,
 }
 
+/// Canonical AD-34 Delta Lake struct schema for `orders_current_state`
+/// (8 `olist_orders` base columns + 6 CQRS/concession overlay columns).
+pub const ORDERS_CURRENT_STATE_SCHEMA_JSON: &str = r#"{"type":"struct","fields":[{"name":"order_id","type":"string","nullable":false,"metadata":{}},{"name":"customer_id","type":"string","nullable":false,"metadata":{}},{"name":"order_status","type":"string","nullable":false,"metadata":{}},{"name":"order_purchase_timestamp","type":"timestamp","nullable":false,"metadata":{}},{"name":"order_approved_at","type":"timestamp","nullable":true,"metadata":{}},{"name":"order_delivered_carrier_date","type":"timestamp","nullable":true,"metadata":{}},{"name":"order_delivered_customer_date","type":"timestamp","nullable":true,"metadata":{}},{"name":"order_estimated_delivery_date","type":"timestamp","nullable":false,"metadata":{}},{"name":"total_amount_cents","type":"long","nullable":false,"metadata":{}},{"name":"total_freight_cents","type":"long","nullable":false,"metadata":{}},{"name":"courtesy_credit_cents","type":"long","nullable":false,"metadata":{}},{"name":"credit_delta","type":"long","nullable":false,"metadata":{}},{"name":"version","type":"long","nullable":false,"metadata":{}},{"name":"updated_at","type":"timestamp","nullable":false,"metadata":{}}]}"#;
+
 /// Helper utility to write a valid Delta Lake directory (`_delta_log/00000000000000000000.json`
 /// plus snapshot data file) for testing and local bootstrapping in the projection tier.
 pub fn write_delta_table_snapshot<T: Serialize>(
@@ -41,10 +45,12 @@ pub fn write_delta_table_snapshot<T: Serialize>(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     fs::write(&data_file_path, data_json.as_bytes())?;
 
+    let escaped_schema = serde_json::to_string(ORDERS_CURRENT_STATE_SCHEMA_JSON)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let commit_path = delta_log_dir.join("00000000000000000000.json");
     let commit_lines = format!(
         "{{\"protocol\":{{\"minReaderVersion\":1,\"minWriterVersion\":2}}}}\n\
-         {{\"metaData\":{{\"id\":\"delta-orders-current-state\",\"name\":\"orders_current_state\",\"schemaString\":\"{{\\\"type\\\":\\\"struct\\\"}}\"}}}}\n\
+         {{\"metaData\":{{\"id\":\"delta-orders-current-state\",\"name\":\"orders_current_state\",\"schemaString\":{escaped_schema}}}}}\n\
          {{\"add\":{{\"path\":\"{data_file_name}\",\"size\":{},\"modificationTime\":1730000000000,\"dataChange\":true}}}}\n",
         data_json.len()
     );

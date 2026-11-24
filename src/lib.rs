@@ -48,7 +48,7 @@ pub use consumer::{
     CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
     ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
 };
-pub use delta::{write_delta_table_snapshot, DeltaLogMetadata};
+pub use delta::{write_delta_table_snapshot, DeltaLogMetadata, ORDERS_CURRENT_STATE_SCHEMA_JSON};
 pub use domain::order::{
     validate_courtesy_credit_amount, CallbackConsumer, CallbackConsumerOutcome, CallbackError,
     CallbackOutcome, CallbackPublisher, CallbackService, CancelOrderCommand, CommandHandler,
@@ -57,11 +57,11 @@ pub use domain::order::{
     EnterpriseDispatcher, EnterpriseResponse, EnterpriseSettlementRequest, EventListener,
     FailCourtesyCreditSettlementCommand, GetOrderQuery, HttpEnterpriseDispatcher,
     InMemoryEnterpriseDispatcher, InvariantError, IssueCourtesyCreditCommand, ListOrdersQuery,
-    MockEnterpriseDispatcher, OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent,
-    OrderEvent, OrderSagaManager, OrderStatus, OrderStatusUpdatedEvent, SagaConfig, SagaError,
-    SagaOutcome, SettleCourtesyCreditCommand, SettlementCallbackMessage, SettlementStatus,
-    CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, CALLBACK_TOPIC, DEFAULT_LIST_ORDERS_LIMIT,
-    MAX_COURTESY_CREDIT_CENTS, MAX_LIST_ORDERS_LIMIT,
+    MockEnterpriseDispatcher, OlistOrderRecord, OrderAggregate, OrderCancelledEvent, OrderCommand,
+    OrderCreatedEvent, OrderEvent, OrderSagaManager, OrderStatus, OrderStatusUpdatedEvent,
+    SagaConfig, SagaError, SagaOutcome, SettleCourtesyCreditCommand, SettlementCallbackMessage,
+    SettlementStatus, CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, CALLBACK_TOPIC,
+    DEFAULT_LIST_ORDERS_LIMIT, MAX_COURTESY_CREDIT_CENTS, MAX_LIST_ORDERS_LIMIT,
 };
 pub use id::{generate_uuidv7, is_valid_uuidv7, parse_uuidv7};
 pub use publisher::{
@@ -79,7 +79,9 @@ pub mod prelude {
         CommandConsumer, CommandOutcome, Config, IggyStreamConsumer, InMemoryStreamConsumer,
         ProjectionConsumer, ProjectionOutcome, ReceivedMessage, StreamConsumer,
     };
-    pub use crate::delta::{write_delta_table_snapshot, DeltaLogMetadata};
+    pub use crate::delta::{
+        write_delta_table_snapshot, DeltaLogMetadata, ORDERS_CURRENT_STATE_SCHEMA_JSON,
+    };
     pub use crate::domain::order::{
         validate_courtesy_credit_amount, CallbackConsumer, CallbackConsumerOutcome, CallbackError,
         CallbackOutcome, CallbackPublisher, CallbackService, CancelOrderCommand, CommandHandler,
@@ -88,9 +90,9 @@ pub mod prelude {
         CreditSettlementStatus, DomainError, DomainEvent, EnterpriseDispatcher, EnterpriseResponse,
         EnterpriseSettlementRequest, EventListener, FailCourtesyCreditSettlementCommand,
         GetOrderQuery, HttpEnterpriseDispatcher, InMemoryEnterpriseDispatcher, InvariantError,
-        IssueCourtesyCreditCommand, ListOrdersQuery, MockEnterpriseDispatcher, OrderAggregate,
-        OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent, OrderSagaManager,
-        OrderStatus, OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome,
+        IssueCourtesyCreditCommand, ListOrdersQuery, MockEnterpriseDispatcher, OlistOrderRecord,
+        OrderAggregate, OrderCancelledEvent, OrderCommand, OrderCreatedEvent, OrderEvent,
+        OrderSagaManager, OrderStatus, OrderStatusUpdatedEvent, SagaConfig, SagaError, SagaOutcome,
         SettleCourtesyCreditCommand, SettlementCallbackMessage, SettlementStatus,
         CALLBACKS_CONSUMER_GROUP, CALLBACKS_TOPIC, CALLBACK_TOPIC, DEFAULT_LIST_ORDERS_LIMIT,
         MAX_COURTESY_CREDIT_CENTS, MAX_LIST_ORDERS_LIMIT,
