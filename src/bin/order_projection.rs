@@ -109,6 +109,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut consumer = ProjectionConsumer::with_store(config, stream, publisher, event_store);
 
+    if let Ok(tidb_url) = std::env::var("TIDB_URL") {
+        if !tidb_url.trim().is_empty() {
+            match ferrous_cqrses::tidb::TiDbProjectionStore::connect(tidb_url.trim()).await {
+                Ok(store) => {
+                    info!(tidb_url = %tidb_url, "Connected order-projection to TiDB (AD-36)");
+                    consumer = consumer.with_projection_store(Arc::new(store));
+                }
+                Err(e) => {
+                    info!(
+                        tidb_url = %tidb_url,
+                        error = %e,
+                        "TiDB connection failed in order-projection; continuing without TiDB store"
+                    );
+                }
+            }
+        }
+    }
+
     // Spawn periodic heartbeat updater on /tmp/daemon_heartbeat for container healthcheck probe
     tokio::spawn(async {
         let heartbeat_path = std::path::Path::new("/tmp/daemon_heartbeat");

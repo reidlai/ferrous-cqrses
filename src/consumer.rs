@@ -663,6 +663,7 @@ pub struct ProjectionConsumer<
     stream: S,
     publisher: P,
     delta_table_dir: Option<std::path::PathBuf>,
+    projection_store: Option<Arc<dyn crate::tidb::OrderProjectionStore>>,
     outcomes: Vec<ProjectionOutcome>,
 }
 
@@ -676,6 +677,7 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             stream,
             publisher,
             delta_table_dir: None,
+            projection_store: None,
             outcomes: Vec::new(),
         }
     }
@@ -694,6 +696,7 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             stream,
             publisher,
             delta_table_dir: None,
+            projection_store: None,
             outcomes: Vec::new(),
         }
     }
@@ -701,6 +704,15 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
     /// Configures a Delta Lake table directory for persisting materialized snapshots via `delta-rs`.
     pub fn with_delta_table_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.delta_table_dir = Some(dir.into());
+        self
+    }
+
+    /// Configures a transactional [`crate::tidb::OrderProjectionStore`] (e.g. TiDB, AD-36).
+    pub fn with_projection_store(
+        mut self,
+        store: Arc<dyn crate::tidb::OrderProjectionStore>,
+    ) -> Self {
+        self.projection_store = Some(store);
         self
     }
 
@@ -808,12 +820,15 @@ impl<S: StreamConsumer, P: StreamPublisher> ProjectionConsumer<S, P> {
             aggregate.apply(&event)?;
         }
 
-        // 3. Construct ConsolidatedOrderProjection snapshot & commit to Delta Lake if configured
+        // 3. Construct ConsolidatedOrderProjection snapshot & commit to TiDB / store if configured
         let projection = ConsolidatedOrderProjection::from_aggregate(
             &aggregate,
             credit_delta,
             event.timestamp(),
         );
+        if let Some(ref store) = self.projection_store {
+            store.upsert_projection(&projection).await?;
+        }
         if let Some(ref table_dir) = self.delta_table_dir {
             crate::delta::write_delta_table_snapshot(table_dir, std::slice::from_ref(&projection))
                 .map_err(|e| DomainError::Generic(format!("Delta Lake snapshot write failed: {e}")))?;
