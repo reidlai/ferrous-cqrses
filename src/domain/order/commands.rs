@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::aggregate::{OrderItemValue, OrderPaymentValue};
 use crate::id::generate_uuidv7;
 
 /// Command requesting a courtesy credit concession on an order.
@@ -54,6 +55,10 @@ pub struct CreateOrderCommand {
     pub customer_id: String,
     pub total_freight_cents: i64,
     pub delivery_sla: DateTime<Utc>,
+    #[serde(default)]
+    pub items: Vec<OrderItemValue>,
+    #[serde(default)]
+    pub payments: Vec<OrderPaymentValue>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -70,8 +75,20 @@ impl CreateOrderCommand {
             customer_id: customer_id.into(),
             total_freight_cents,
             delivery_sla,
+            items: Vec::new(),
+            payments: Vec::new(),
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_items(mut self, items: Vec<OrderItemValue>) -> Self {
+        self.items = items;
+        self
+    }
+
+    pub fn with_payments(mut self, payments: Vec<OrderPaymentValue>) -> Self {
+        self.payments = payments;
+        self
     }
 }
 

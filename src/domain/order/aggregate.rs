@@ -71,6 +71,27 @@ fn default_epoch() -> DateTime<Utc> {
     DateTime::UNIX_EPOCH
 }
 
+/// Line-item value object matching Kaggle `olist_order_items_dataset.csv` (AD-35).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderItemValue {
+    pub order_item_id: u32,
+    pub product_id: String,
+    pub seller_id: String,
+    #[serde(default)]
+    pub shipping_limit_date: Option<DateTime<Utc>>,
+    pub price_cents: i64,
+    pub freight_cents: i64,
+}
+
+/// Payment-leg value object matching Kaggle `olist_order_payments_dataset.csv` (AD-35).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderPaymentValue {
+    pub payment_sequential: u32,
+    pub payment_type: String,
+    pub payment_installments: u32,
+    pub payment_value_cents: i64,
+}
+
 /// Core domain aggregate representing an e-commerce order with event-sourced rehydration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderAggregate {
@@ -91,6 +112,10 @@ pub struct OrderAggregate {
     pub order_delivered_carrier_date: Option<DateTime<Utc>>,
     pub delivery_sla: DateTime<Utc>,
     pub actual_delivery: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub items: Vec<OrderItemValue>,
+    #[serde(default)]
+    pub payments: Vec<OrderPaymentValue>,
     pub version: u64,
 }
 
@@ -110,6 +135,8 @@ impl Default for OrderAggregate {
             order_delivered_carrier_date: None,
             delivery_sla: DateTime::UNIX_EPOCH,
             actual_delivery: None,
+            items: Vec::new(),
+            payments: Vec::new(),
             version: 0,
         }
     }
@@ -137,8 +164,39 @@ impl OrderAggregate {
             order_delivered_carrier_date: None,
             delivery_sla,
             actual_delivery: None,
+            items: Vec::new(),
+            payments: Vec::new(),
             version: 0,
         }
+    }
+
+    /// Attaches Olist item and payment value objects, recomputing `total_amount_cents`
+    /// and `total_freight_cents` when `items` is non-empty (AD-35).
+    pub fn with_items_and_payments(
+        mut self,
+        items: Vec<OrderItemValue>,
+        payments: Vec<OrderPaymentValue>,
+    ) -> Self {
+        if !items.is_empty() {
+            self.total_amount_cents = items.iter().map(|i| i.price_cents).sum();
+            self.total_freight_cents = items.iter().map(|i| i.freight_cents).sum();
+        }
+        self.items = items;
+        self.payments = payments;
+        self
+    }
+
+    /// Returns total recorded payment value across all payment legs in cents (AD-35).
+    pub fn total_payment_cents(&self) -> i64 {
+        self.payments.iter().map(|p| p.payment_value_cents).sum()
+    }
+
+    /// Returns the primary payment method (`payment_sequential == 1` or first leg), if recorded.
+    pub fn primary_payment_type(&self) -> Option<&str> {
+        self.payments
+            .iter()
+            .min_by_key(|p| p.payment_sequential)
+            .map(|p| p.payment_type.as_str())
     }
 
     /// Validates whether a courtesy credit concession can be granted under business invariants:
@@ -248,6 +306,14 @@ impl OrderAggregate {
                 self.order_id = e.order_id.clone();
                 self.customer_id = e.customer_id.clone();
                 self.total_freight_cents = e.total_freight_cents;
+                if !e.items.is_empty() {
+                    self.total_amount_cents = e.items.iter().map(|i| i.price_cents).sum();
+                    if self.total_freight_cents == 0 {
+                        self.total_freight_cents = e.items.iter().map(|i| i.freight_cents).sum();
+                    }
+                }
+                self.items = e.items.clone();
+                self.payments = e.payments.clone();
                 self.order_purchase_timestamp = e.created_at;
                 self.delivery_sla = e.delivery_sla;
                 self.status = OrderStatus::Created;

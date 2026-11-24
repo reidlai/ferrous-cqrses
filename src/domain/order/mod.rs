@@ -14,8 +14,8 @@ pub mod queries;
 pub mod saga;
 
 pub use aggregate::{
-    validate_courtesy_credit_amount, CreditSettlementStatus, OrderAggregate, OrderStatus,
-    MAX_COURTESY_CREDIT_CENTS,
+    validate_courtesy_credit_amount, CreditSettlementStatus, OrderAggregate, OrderItemValue,
+    OrderPaymentValue, OrderStatus, MAX_COURTESY_CREDIT_CENTS,
 };
 pub use callback::{
     CallbackConsumer, CallbackConsumerOutcome, CallbackError, CallbackOutcome, CallbackPublisher,
