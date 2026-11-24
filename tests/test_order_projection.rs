@@ -237,3 +237,34 @@ async fn test_projection_consumer_duplicate_event_idempotency() {
     assert!(outcome2.is_some());
     assert!(matches!(outcome2.unwrap(), ProjectionOutcome::Success { offset: 11, .. }));
 }
+
+#[tokio::test]
+async fn test_story_23_3_projection_consumer_commits_to_order_projection_store() {
+    let config = Config::default();
+    let order_id = format!("ord-tidb-{}", Uuid::now_v7());
+    let stream = InMemoryStreamConsumer::new();
+    let publisher = InMemoryStreamPublisher::new();
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let proj_store = Arc::new(ferrous_cqrses::InMemoryProjectionStore::new());
+
+    let mut consumer = ProjectionConsumer::with_store(config, stream, publisher, store)
+        .with_projection_store(proj_store.clone());
+
+    let created = DomainEvent::OrderCreated(OrderCreatedEvent::new(
+        &order_id,
+        "cust-tidb",
+        1500,
+        Utc::now(),
+    ));
+    consumer
+        .stream_mut()
+        .enqueue(ReceivedMessage::new(0, 0, serde_json::to_vec(&created).unwrap()));
+
+    let outcome = consumer.process_next().await.unwrap().expect("outcome");
+    assert!(matches!(outcome, ProjectionOutcome::Success { .. }));
+
+    let saved = proj_store.get(&order_id).expect("projection must be persisted in OrderProjectionStore");
+    assert_eq!(saved.order_id, order_id);
+    assert_eq!(saved.customer_id, "cust-tidb");
+    assert_eq!(saved.total_freight_cents, 1500);
+}

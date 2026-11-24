@@ -2,7 +2,7 @@
 # Hardened rootless FROM scratch container build for ferrous-cqrses order projection daemon
 # Adheres strictly to AD-24 (<35MB footprint, UID 10001, static musl, Day-0 defense)
 
-FROM rust:1.99-alpine AS builder
+FROM rust:1.98-alpine AS builder
 
 RUN apk add --no-cache musl-dev gcc make ca-certificates
 

@@ -42,6 +42,7 @@ pub mod id;
 pub mod publisher;
 pub mod serialization;
 pub mod sierra;
+pub mod tidb;
 
 // Public re-exports for canonical top-level crate consumption (AD-15)
 pub use consumer::{
@@ -73,6 +74,7 @@ pub use sierra::{
     deserialize_event, serialize_event, stream_id_for_order, EventStore, ExpectedVersion,
     InMemoryEventStore, RespValue, SierraClient, SierraDbEventStore, SierraEventStore,
 };
+pub use tidb::{InMemoryProjectionStore, OrderProjectionStore, TiDbProjectionStore};
 
 /// Convenience module for glob-importing all core domain contracts and infrastructure interfaces.
 pub mod prelude {
